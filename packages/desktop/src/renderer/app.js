@@ -40,9 +40,13 @@ const PRESET_OPTIONS = [
 ];
 const PRESET_BY_ID = new Map(PRESET_OPTIONS.map((option) => [option.id, option]));
 
-const DEBUG_EMPTY_TEXT = "Desktop event log will appear here.";
-const COMMAND_LOG_EMPTY_TEXT = "Command activity will appear here.";
 const RUN_DETAILS_COLLAPSED_KEY = "gradient-code:run-details-collapsed";
+const ACTIVITY_FILTERS = [
+  { id: "conversation", label: "Conversation", activeByDefault: true },
+  { id: "tools", label: "Tools", activeByDefault: true },
+  { id: "commands", label: "Commands", activeByDefault: true },
+  { id: "debug", label: "Debug", activeByDefault: false },
+];
 
 const state = {
   cwd: "",
@@ -54,15 +58,17 @@ const state = {
   approvals: [],
   sessions: [],
   waitingTimer: null,
-  rightPaneWidth: 360,
-  rightPaneCollapsed: false,
   runDetailsCollapsed: true,
   cancelRequested: false,
-  commandEntries: [],
   progress: createDefaultProgressState(),
   threadContexts: new Map(),
   assistantStates: new Map(),
   runThreadMap: new Map(),
+  activityEntryMap: new Map(),
+  workspaceThreadId: null,
+  activeFilters: new Set(
+    ACTIVITY_FILTERS.filter((filter) => filter.activeByDefault).map((filter) => filter.id),
+  ),
   pendingThreadId: null,
   currentRunId: null,
   nextThreadIndex: 1,
@@ -132,28 +138,17 @@ const elements = {
   progressChips: document.getElementById("progressChips"),
   progressBarFill: document.getElementById("progressBarFill"),
   presetChips: document.getElementById("presetChips"),
+  activityFilters: document.getElementById("activityFilters"),
   transcript: document.getElementById("transcript"),
-  approvalModal: document.getElementById("approvalModal"),
-  approvalModalSubtitle: document.getElementById("approvalModalSubtitle"),
   composerForm: document.getElementById("composerForm"),
   promptInput: document.getElementById("promptInput"),
   sendButton: document.getElementById("sendButton"),
   resumeButton: document.getElementById("resumeButton"),
   cancelButton: document.getElementById("cancelButton"),
-  detailPaneToggle: document.getElementById("detailPaneToggle"),
   sessionList: document.getElementById("sessionList"),
   refreshSessionsButton: document.getElementById("refreshSessionsButton"),
-  approvalList: document.getElementById("approvalList"),
-  commandLogList: document.getElementById("commandLogList"),
-  debugConsole: document.getElementById("debugConsole"),
-  detailResizeHandle: document.getElementById("detailResizeHandle"),
 };
 let presetButtons = [];
-
-const RIGHT_PANE_WIDTH_KEY = "gradient-code:right-pane-width";
-const RIGHT_PANE_COLLAPSED_KEY = "gradient-code:right-pane-collapsed";
-const MIN_RIGHT_PANE_WIDTH = 320;
-const MAX_RIGHT_PANE_WIDTH = 720;
 
 function setStatus(text) {
   elements.statusBarText.textContent = text;
@@ -198,51 +193,6 @@ function setPreset(preset) {
   }
 }
 
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value));
-}
-
-function applyRightPaneWidth(width) {
-  const clampedWidth = clamp(width, MIN_RIGHT_PANE_WIDTH, Math.min(MAX_RIGHT_PANE_WIDTH, window.innerWidth - 420));
-  state.rightPaneWidth = clampedWidth;
-  document.documentElement.style.setProperty("--right-pane-width", `${clampedWidth}px`);
-}
-
-function applyRightPaneCollapsed(collapsed) {
-  state.rightPaneCollapsed = Boolean(collapsed);
-  document.body.classList.toggle("detail-pane-collapsed", state.rightPaneCollapsed);
-  elements.detailPaneToggle.setAttribute("aria-expanded", String(!state.rightPaneCollapsed));
-  elements.detailPaneToggle.setAttribute(
-    "aria-label",
-    state.rightPaneCollapsed ? "Open right sidebar" : "Collapse right sidebar",
-  );
-  elements.detailPaneToggle.title = state.rightPaneCollapsed
-    ? "Open command log and debug sidebar"
-    : "Collapse command log and debug sidebar";
-  elements.detailPaneToggle.querySelector(".detail-pane-toggle-icon").textContent = state.rightPaneCollapsed ? "<" : ">";
-}
-
-function loadPaneWidthPreference() {
-  const raw = window.localStorage.getItem(RIGHT_PANE_WIDTH_KEY);
-  const parsed = Number.parseInt(raw || "", 10);
-  if (Number.isFinite(parsed)) {
-    applyRightPaneWidth(parsed);
-  }
-}
-
-function loadPaneCollapsedPreference() {
-  const raw = window.localStorage.getItem(RIGHT_PANE_COLLAPSED_KEY);
-  applyRightPaneCollapsed(raw === "true");
-}
-
-function savePaneWidthPreference() {
-  window.localStorage.setItem(RIGHT_PANE_WIDTH_KEY, String(state.rightPaneWidth));
-}
-
-function savePaneCollapsedPreference() {
-  window.localStorage.setItem(RIGHT_PANE_COLLAPSED_KEY, String(state.rightPaneCollapsed));
-}
-
 function applyRunDetailsCollapsed(collapsed) {
   state.runDetailsCollapsed = Boolean(collapsed);
   elements.progressToggle.setAttribute("aria-expanded", String(!state.runDetailsCollapsed));
@@ -263,53 +213,6 @@ function toggleRunDetails() {
   saveRunDetailsPreference();
   renderProgress();
 }
-
-function initializeResizeHandle() {
-  if (!elements.detailResizeHandle) {
-    return;
-  }
-
-  elements.detailResizeHandle.addEventListener("pointerdown", (event) => {
-    if (state.rightPaneCollapsed) {
-      return;
-    }
-    event.preventDefault();
-    document.body.classList.add("resizing");
-
-    const onPointerMove = (moveEvent) => {
-      const nextWidth = window.innerWidth - moveEvent.clientX;
-      applyRightPaneWidth(nextWidth);
-    };
-
-    const onPointerUp = () => {
-      document.body.classList.remove("resizing");
-      savePaneWidthPreference();
-      window.removeEventListener("pointermove", onPointerMove);
-      window.removeEventListener("pointerup", onPointerUp);
-    };
-
-    window.addEventListener("pointermove", onPointerMove);
-    window.addEventListener("pointerup", onPointerUp);
-  });
-}
-
-function toggleRightPane() {
-  applyRightPaneCollapsed(!state.rightPaneCollapsed);
-  savePaneCollapsedPreference();
-}
-
-function appendDebug(message) {
-  const timestamp = new Date().toLocaleTimeString();
-  const nextLine = `[${timestamp}] ${message}`;
-  if (elements.debugConsole.textContent === DEBUG_EMPTY_TEXT) {
-    elements.debugConsole.textContent = nextLine;
-  } else {
-    elements.debugConsole.textContent += `\n${nextLine}`;
-  }
-  elements.debugConsole.scrollTop = elements.debugConsole.scrollHeight;
-}
-
-appendDebug(`desktopApi:${desktopApi ? "available" : "missing"}`);
 
 function toErrorMessage(error) {
   if (error instanceof Error && error.message) {
@@ -343,6 +246,87 @@ function setRunning(running) {
     clearTimeout(state.waitingTimer);
     state.waitingTimer = null;
   }
+}
+
+function isFilterActive(category) {
+  return state.activeFilters.has(category);
+}
+
+function updateFilterButtonState(button, category) {
+  const active = isFilterActive(category);
+  button.classList.toggle("active", active);
+  button.setAttribute("aria-pressed", String(active));
+}
+
+function applyActivityFilters() {
+  elements.transcript.querySelectorAll(".timeline-entry").forEach((entry) => {
+    const category = entry.dataset.category || "conversation";
+    entry.classList.toggle("is-filtered-out", !isFilterActive(category));
+  });
+
+  elements.transcript.querySelectorAll(".thread-section").forEach((section) => {
+    const hasVisibleEntries = [...section.querySelectorAll(".timeline-entry")].some(
+      (entry) => !entry.classList.contains("is-filtered-out"),
+    );
+    section.classList.toggle("is-filtered-out", !hasVisibleEntries);
+  });
+}
+
+function renderActivityFilters() {
+  elements.activityFilters.textContent = "";
+  for (const filter of ACTIVITY_FILTERS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "activity-filter-chip";
+    button.dataset.category = filter.id;
+    button.textContent = filter.label;
+    updateFilterButtonState(button, filter.id);
+    button.addEventListener("click", () => {
+      if (state.activeFilters.has(filter.id)) {
+        state.activeFilters.delete(filter.id);
+      } else {
+        state.activeFilters.add(filter.id);
+      }
+      updateFilterButtonState(button, filter.id);
+      applyActivityFilters();
+    });
+    elements.activityFilters.append(button);
+  }
+}
+
+function findBestDebugThreadId() {
+  if (state.currentRunId && state.runThreadMap.has(state.currentRunId)) {
+    return state.runThreadMap.get(state.currentRunId);
+  }
+
+  if (state.pendingThreadId) {
+    return state.pendingThreadId;
+  }
+
+  return state.workspaceThreadId ?? ensureWorkspaceThread();
+}
+
+function appendDebug(message) {
+  const threadId = findBestDebugThreadId();
+  if (!threadId) {
+    return;
+  }
+
+  const detail = String(message || "");
+  const summary = truncateText(detail, 220);
+
+  appendTimelineEntry(threadId, {
+    id: `debug-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    category: "debug",
+    label: "Debug",
+    title: truncateText(detail, 120) || "Debug event",
+    meta: formatTime(new Date().toISOString()),
+    status: "info",
+    statusLabel: "Debug",
+    summary,
+    detail: detail.length > summary.length ? detail : "",
+    compact: true,
+  });
 }
 
 function formatTime(value) {
@@ -572,9 +556,10 @@ function clearEmptyState(target) {
   target.textContent = "";
 }
 
-function resetLogPanels() {
-  state.commandEntries = [];
-  createEmptyState(elements.commandLogList, COMMAND_LOG_EMPTY_TEXT);
+function decorateTimelineEntry(element, category) {
+  element.classList.add("timeline-entry");
+  element.dataset.category = category;
+  element.classList.toggle("is-filtered-out", !isFilterActive(category));
 }
 
 function createThreadContext({ threadId, title, subtitle, status, statusTone }) {
@@ -619,7 +604,6 @@ function createThreadContext({ threadId, title, subtitle, status, statusTone }) 
     titleElement,
     metaElement,
     statusElement,
-    currentActivityBlock: null,
   };
 
   state.threadContexts.set(threadId, context);
@@ -677,6 +661,23 @@ function createThreadTitle(threadIndex, prompt) {
   return `${firstLine.slice(0, 69)}...`;
 }
 
+function ensureWorkspaceThread() {
+  if (state.workspaceThreadId && state.threadContexts.has(state.workspaceThreadId)) {
+    return state.workspaceThreadId;
+  }
+
+  const threadId = "workspace-thread";
+  state.workspaceThreadId = threadId;
+  createThreadContext({
+    threadId,
+    title: "Workspace activity",
+    subtitle: state.cwd ? formatWorkspaceLabel(state.cwd) : "Desktop shell",
+    status: "Ready",
+    statusTone: "",
+  });
+  return threadId;
+}
+
 function startNewThread(prompt, options = {}) {
   const threadIndex = options.threadIndex ?? state.nextThreadIndex;
   state.nextThreadIndex = Math.max(state.nextThreadIndex, threadIndex + 1);
@@ -710,26 +711,16 @@ function getAssistantState(threadId) {
   return next;
 }
 
-function finalizeInlineActivityBlock(threadId) {
-  const context = state.threadContexts.get(threadId);
-  if (!context?.currentActivityBlock) {
-    return;
-  }
-
-  context.currentActivityBlock.root.open = false;
-  context.currentActivityBlock = null;
-}
-
 function createBubble(role, text, threadId) {
   const context = ensureThreadContext(threadId, {
     title: `Conversation ${state.nextThreadIndex}`,
     subtitle: "Session thread",
     status: "Loaded",
   });
-  finalizeInlineActivityBlock(threadId);
 
   const wrapper = document.createElement("div");
   wrapper.className = `bubble ${role}`;
+  decorateTimelineEntry(wrapper, "conversation");
   const label = document.createElement("div");
   label.className = "bubble-label";
   label.textContent = role === "assistant" ? "Assistant" : role === "user" ? "You" : "System";
@@ -836,165 +827,142 @@ function appendAssistantEvent(threadId, text) {
   assistantState.turnText = "";
 }
 
-function buildActivitySummaryItem(entry) {
-  const item = document.createElement("div");
-  item.className = "activity-summary-item";
+function buildDisclosure(label, className, text, open = false) {
+  const disclosure = document.createElement("details");
+  disclosure.className = "timeline-entry-disclosure";
+  disclosure.open = open;
+
+  const summary = document.createElement("summary");
+  summary.className = "timeline-entry-disclosure-toggle";
+  summary.textContent = label;
+
+  const body = document.createElement("pre");
+  body.className = className;
+  body.textContent = text;
+
+  disclosure.append(summary, body);
+  return disclosure;
+}
+
+function createTimelineEntryElement(entry) {
+  const card = document.createElement("article");
+  card.className = "panel-entry";
+  decorateTimelineEntry(card, entry.category);
+
+  if (entry.compact) {
+    card.classList.add("timeline-entry-compact");
+  }
+  if (entry.approval) {
+    card.classList.add("timeline-entry-approval", "timeline-entry-elevated");
+  }
+  if (entry.diff) {
+    card.classList.add("timeline-entry-edit", "timeline-entry-elevated");
+  }
+  if (entry.status === "failed" || entry.status === "error") {
+    card.classList.add("timeline-entry-error", "timeline-entry-elevated");
+  }
+
+  if (entry.label) {
+    const label = document.createElement("div");
+    label.className = "panel-entry-label";
+    label.textContent = entry.label;
+    card.append(label);
+  }
 
   const header = document.createElement("div");
-  header.className = "activity-summary-item-header";
+  header.className = "panel-entry-header";
+
+  const titleWrap = document.createElement("div");
+  titleWrap.className = "panel-entry-title";
 
   const title = document.createElement("strong");
-  title.textContent = entry.summary || entry.title;
+  title.textContent = entry.title;
 
-  const status = document.createElement("div");
-  status.className = "panel-entry-status";
-  const tone = pickEntryTone(entry.status);
-  if (tone) {
-    status.classList.add(tone);
+  const meta = document.createElement("div");
+  meta.className = "panel-entry-meta";
+  meta.textContent = entry.meta;
+
+  titleWrap.append(title, meta);
+  header.append(titleWrap);
+
+  if (entry.statusLabel) {
+    const status = document.createElement("div");
+    status.className = "panel-entry-status";
+    const tone = pickEntryTone(entry.status);
+    if (tone) {
+      status.classList.add(tone);
+    }
+    status.textContent = entry.statusLabel;
+    header.append(status);
   }
-  status.textContent = entry.statusLabel;
 
-  header.append(title, status);
-  item.append(header);
+  card.append(header);
 
-  if (entry.summary && entry.summary !== entry.title) {
-    const toolName = document.createElement("div");
-    toolName.className = "activity-summary-tool";
-    toolName.textContent = entry.title;
-    item.append(toolName);
+  if (entry.summary) {
+    const summary = document.createElement("div");
+    summary.className = "panel-entry-summary";
+    if (entry.markdown === true) {
+      summary.innerHTML = renderMarkdown(entry.summary);
+    } else {
+      summary.textContent = entry.summary;
+    }
+    card.append(summary);
   }
 
   if (entry.detail) {
-    const disclosure = document.createElement("details");
-    disclosure.className = "activity-summary-disclosure";
-    if (entry.status === "failed") {
-      disclosure.open = true;
-    }
-
-    const disclosureSummary = document.createElement("summary");
-    disclosureSummary.className = "activity-summary-disclosure-toggle";
-    disclosureSummary.textContent = "Raw output";
-
-    const detail = document.createElement("pre");
-    detail.className = "activity-summary-detail";
-    detail.textContent = entry.detail;
-
-    disclosure.append(disclosureSummary, detail);
-    item.append(disclosure);
+    card.append(buildDisclosure("Raw output", "panel-entry-detail", entry.detail, entry.status === "failed"));
   }
 
   if (entry.diff) {
-    const disclosure = document.createElement("details");
-    disclosure.className = "activity-summary-disclosure";
-
-    const disclosureSummary = document.createElement("summary");
-    disclosureSummary.className = "activity-summary-disclosure-toggle";
-    disclosureSummary.textContent = "Diff preview";
-
-    const diff = document.createElement("pre");
-    diff.className = "activity-summary-diff";
-    diff.textContent = entry.diff;
-
-    disclosure.append(disclosureSummary, diff);
-    item.append(disclosure);
+    card.append(buildDisclosure("Diff preview", "panel-entry-diff", entry.diff));
   }
 
-  return item;
+  if (entry.requestText) {
+    card.append(buildDisclosure("Request details", "panel-entry-detail", entry.requestText, true));
+  }
+
+  if (typeof entry.renderActions === "function") {
+    card.append(entry.renderActions());
+  }
+
+  return card;
 }
 
-function summarizeActivityEntries(entries) {
-  const values = [...entries.values()];
-  const completed = values.filter((entry) => entry.status === "completed").length;
-  const failed = values.filter((entry) => entry.status === "failed").length;
-  const info = values.filter((entry) => entry.status === "info").length;
-  const pending = values.filter((entry) => entry.status === "pending").length;
-  const parts = [`${values.length} step${values.length === 1 ? "" : "s"}`];
-
-  if (completed > 0) {
-    parts.push(`${completed} completed`);
-  }
-  if (pending > 0) {
-    parts.push(`${pending} pending`);
-  }
-  if (failed > 0) {
-    parts.push(`${failed} failed`);
-  }
-  if (info > 0) {
-    parts.push(`${info} info`);
-  }
-
-  return parts.join(" • ");
+function activityEntryKey(threadId, entryId) {
+  return `${threadId}:${entryId}`;
 }
 
-function renderInlineActivityBlock(block) {
-  block.body.textContent = "";
-  for (const entry of block.entries.values()) {
-    block.body.append(buildActivitySummaryItem(entry));
-  }
-  block.meta.textContent = summarizeActivityEntries(block.entries);
-}
-
-function createInlineActivityBlock(threadId) {
+function appendTimelineEntry(threadId, entry) {
   const context = ensureThreadContext(threadId, {
     title: `Conversation ${state.nextThreadIndex}`,
     subtitle: "Session thread",
     status: "Loaded",
   });
-
-  const details = document.createElement("details");
-  details.className = "activity-summary";
-  details.open = true;
-
-  const summary = document.createElement("summary");
-  summary.className = "activity-summary-toggle";
-
-  const title = document.createElement("span");
-  title.className = "activity-summary-title";
-  title.textContent = "Activity summary";
-
-  const meta = document.createElement("span");
-  meta.className = "activity-summary-meta";
-  meta.textContent = "Waiting for tool results...";
-
-  summary.append(title, meta);
-
-  const body = document.createElement("div");
-  body.className = "activity-summary-list";
-
-  details.append(summary, body);
-  context.body.append(details);
-
-  const block = {
-    root: details,
-    meta,
-    body,
-    entries: new Map(),
-  };
-
-  context.currentActivityBlock = block;
+  const element = createTimelineEntryElement(entry);
+  context.body.append(element);
+  state.activityEntryMap.set(activityEntryKey(threadId, entry.id), { entry, element });
+  applyActivityFilters();
   elements.transcript.scrollTop = elements.transcript.scrollHeight;
-  return block;
+  return element;
 }
 
-function getInlineActivityBlock(threadId) {
-  const context = ensureThreadContext(threadId, {
-    title: `Conversation ${state.nextThreadIndex}`,
-    subtitle: "Session thread",
-    status: "Loaded",
-  });
-
-  if (context.currentActivityBlock) {
-    return context.currentActivityBlock;
+function upsertTimelineEntry(threadId, nextEntry) {
+  const key = activityEntryKey(threadId, nextEntry.id);
+  const existing = state.activityEntryMap.get(key);
+  if (!existing) {
+    return appendTimelineEntry(threadId, nextEntry);
   }
 
-  return createInlineActivityBlock(threadId);
-}
-
-function upsertInlineActivityEntry(threadId, nextEntry) {
-  const block = getInlineActivityBlock(threadId);
-  const existing = block.entries.get(nextEntry.id);
-  block.entries.set(nextEntry.id, existing ? { ...existing, ...nextEntry } : nextEntry);
-  renderInlineActivityBlock(block);
+  const merged = {
+    ...existing.entry,
+    ...nextEntry,
+  };
+  const nextElement = createTimelineEntryElement(merged);
+  existing.element.replaceWith(nextElement);
+  state.activityEntryMap.set(key, { entry: merged, element: nextElement });
+  applyActivityFilters();
+  elements.transcript.scrollTop = elements.transcript.scrollHeight;
+  return nextElement;
 }
 
 function commitAssistantText(assistantState, text) {
@@ -1231,92 +1199,12 @@ function pickEntryTone(status) {
   return "";
 }
 
-function buildPanelEntryCard(entry) {
-  const card = document.createElement("div");
-  card.className = "panel-entry";
-
-  const header = document.createElement("div");
-  header.className = "panel-entry-header";
-
-  const titleWrap = document.createElement("div");
-  titleWrap.className = "panel-entry-title";
-
-  const title = document.createElement("strong");
-  title.textContent = entry.title;
-
-  const meta = document.createElement("div");
-  meta.className = "panel-entry-meta";
-  meta.textContent = entry.meta;
-
-  titleWrap.append(title, meta);
-
-  const status = document.createElement("div");
-  status.className = "panel-entry-status";
-  const tone = pickEntryTone(entry.status);
-  if (tone) {
-    status.classList.add(tone);
-  }
-  status.textContent = entry.statusLabel;
-
-  header.append(titleWrap, status);
-  card.append(header);
-
-  if (entry.summary) {
-    const summary = document.createElement("div");
-    summary.className = "panel-entry-summary";
-    summary.textContent = entry.summary;
-    card.append(summary);
-  }
-
-  if (entry.detail) {
-    const detail = document.createElement("pre");
-    detail.className = "panel-entry-detail";
-    detail.textContent = entry.detail;
-    card.append(detail);
-  }
-
-  if (entry.diff) {
-    const diff = document.createElement("pre");
-    diff.className = "panel-entry-diff";
-    diff.textContent = entry.diff;
-    card.append(diff);
-  }
-
-  return card;
-}
-
-function renderCommandLogEntries() {
-  const target = elements.commandLogList;
-  if (state.commandEntries.length === 0) {
-    createEmptyState(target, COMMAND_LOG_EMPTY_TEXT);
-    return;
-  }
-
-  target.textContent = "";
-  clearEmptyState(target);
-  for (const entry of state.commandEntries) {
-    target.append(buildPanelEntryCard(entry));
-  }
-}
-
-function upsertCommandLogEntry(nextEntry) {
-  const list = state.commandEntries;
-  const index = list.findIndex((entry) => entry.id === nextEntry.id);
-  if (index === -1) {
-    list.unshift(nextEntry);
-  } else {
-    list[index] = {
-      ...list[index],
-      ...nextEntry,
-    };
-  }
-  renderCommandLogEntries();
-}
-
 function createPendingToolEntry(payload) {
   const toolCall = payload.toolCall;
   return {
     id: toolCall.callId,
+    category: COMMAND_TOOL_NAMES.has(toolCall.name) ? "commands" : "tools",
+    label: COMMAND_TOOL_NAMES.has(toolCall.name) ? "Command" : "Tool",
     title: toolCall.name,
     meta: `Started ${formatTime(new Date().toISOString())}`,
     status: "pending",
@@ -1344,6 +1232,8 @@ function createFinishedToolEntry(payload) {
 
   return {
     id: toolCall.callId,
+    category: COMMAND_TOOL_NAMES.has(toolCall.name) ? "commands" : "tools",
+    label: COMMAND_TOOL_NAMES.has(toolCall.name) ? "Command" : "Tool",
     title: toolCall.name,
     meta: `Completed ${formatTime(new Date().toISOString())}`,
     status: isInformationalToolResult(result) ? "info" : result?.ok ? "completed" : "failed",
@@ -1354,115 +1244,6 @@ function createFinishedToolEntry(payload) {
     detail: detailParts.filter(Boolean).join("\n\n"),
     diff,
   };
-}
-
-function renderApprovals() {
-  if (state.approvals.length === 0) {
-    elements.approvalList.className = "approval-list approval-modal-list empty-state";
-    elements.approvalList.textContent = "No pending approvals.";
-    elements.approvalModal.classList.add("hidden");
-    elements.approvalModal.setAttribute("aria-hidden", "true");
-    return;
-  }
-
-  elements.approvalList.className = "approval-list approval-modal-list";
-  elements.approvalList.textContent = "";
-  elements.approvalModal.classList.remove("hidden");
-  elements.approvalModal.setAttribute("aria-hidden", "false");
-  elements.approvalModalSubtitle.textContent =
-    state.approvals.length === 1
-      ? "One action is waiting for your approval."
-      : `${state.approvals.length} actions are waiting for your approval.`;
-
-  for (const approval of state.approvals) {
-    const card = document.createElement("div");
-    card.className = "approval-card";
-
-    const title = document.createElement("h3");
-    title.textContent = approval.toolName;
-    card.append(title);
-
-    const { requestText, diffText } = splitApprovalSummary(approval.summary);
-
-    if (diffText) {
-      const diffSection = document.createElement("div");
-      diffSection.className = "approval-section";
-
-      const diffLabel = document.createElement("div");
-      diffLabel.className = "approval-label";
-      diffLabel.textContent = "Diff Preview";
-
-      const diff = document.createElement("pre");
-      diff.className = "approval-diff";
-      diff.textContent = diffText;
-
-      diffSection.append(diffLabel, diff);
-      card.append(diffSection);
-    }
-
-    if (requestText) {
-      const summarySection = document.createElement("div");
-      summarySection.className = "approval-section";
-
-      const summaryLabel = document.createElement("div");
-      summaryLabel.className = "approval-label";
-      summaryLabel.textContent = diffText ? "Request Details" : "Request";
-
-      const summary = document.createElement("pre");
-      summary.className = "approval-summary";
-      summary.textContent = requestText;
-
-      summarySection.append(summaryLabel, summary);
-      card.append(summarySection);
-    }
-
-    const actions = document.createElement("div");
-    actions.className = "approval-actions";
-
-    const approveButton = document.createElement("button");
-    approveButton.className = "solid-button";
-    approveButton.textContent = "Approve";
-    approveButton.addEventListener("click", async () => {
-      appendDebug(`approval:click approve requestId=${approval.requestId}`);
-      if (!desktopApi) {
-        setStatus("Desktop IPC bridge is unavailable.");
-        appendDebug("approval:error desktopApi missing");
-        return;
-      }
-      await desktopApi.respondApproval(approval.requestId, true);
-      state.approvals = state.approvals.filter((item) => item.requestId !== approval.requestId);
-      renderApprovals();
-      updateProgress({
-        phase: "running-tools",
-        activeToolName: approval.toolName,
-      });
-      setStatus(`Approved ${approval.toolName}. Waiting for run to continue...`);
-    });
-
-    const denyButton = document.createElement("button");
-    denyButton.className = "ghost-button";
-    denyButton.textContent = "Deny";
-    denyButton.addEventListener("click", async () => {
-      appendDebug(`approval:click deny requestId=${approval.requestId}`);
-      if (!desktopApi) {
-        setStatus("Desktop IPC bridge is unavailable.");
-        appendDebug("approval:error desktopApi missing");
-        return;
-      }
-      await desktopApi.respondApproval(approval.requestId, false);
-      state.approvals = state.approvals.filter((item) => item.requestId !== approval.requestId);
-      renderApprovals();
-      updateProgress({
-        phase: "tool-error",
-        activeToolName: approval.toolName,
-      });
-      setStatus(`Denied ${approval.toolName}. Waiting for run to continue...`);
-    });
-
-    actions.append(approveButton, denyButton);
-    card.append(actions);
-    elements.approvalList.append(card);
-  }
 }
 
 function splitApprovalSummary(summary) {
@@ -1485,6 +1266,71 @@ function splitApprovalSummary(summary) {
   return {
     requestText: normalized.slice(0, diffMatch.index).trim(),
     diffText: normalized.slice(diffMatch.index).trim(),
+  };
+}
+
+async function respondToApproval(approval, approved) {
+  appendDebug(`approval:click ${approved ? "approve" : "deny"} requestId=${approval.requestId}`);
+  if (!desktopApi) {
+    setStatus("Desktop IPC bridge is unavailable.");
+    appendDebug("approval:error desktopApi missing");
+    return;
+  }
+
+  await desktopApi.respondApproval(approval.requestId, approved);
+  state.approvals = state.approvals.filter((item) => item.requestId !== approval.requestId);
+  upsertTimelineEntry(approval.threadId, createApprovalTimelineEntry(approval, approved ? "approved" : "denied"));
+  updateProgress({
+    phase: approved ? "running-tools" : "tool-error",
+    activeToolName: approval.toolName,
+  });
+  setStatus(`${approved ? "Approved" : "Denied"} ${approval.toolName}. Waiting for run to continue...`);
+}
+
+function createApprovalTimelineEntry(approval, resolution = "pending") {
+  const { requestText, diffText } = splitApprovalSummary(approval.summary);
+  const status = resolution === "approved" ? "completed" : resolution === "denied" ? "failed" : "pending";
+  const statusLabel = resolution === "approved" ? "Approved" : resolution === "denied" ? "Denied" : "Needs Review";
+
+  return {
+    id: approval.requestId,
+    category: "tools",
+    label: "Approval",
+    title: approval.toolName,
+    meta: resolution === "pending" ? "Action paused until you decide" : `Decision recorded ${formatTime(new Date().toISOString())}`,
+    status,
+    statusLabel,
+    summary: resolution === "pending"
+      ? `Review the ${approval.toolName} request before the run continues.`
+      : resolution === "approved"
+        ? `${approval.toolName} was approved and the run can continue.`
+        : `${approval.toolName} was denied.`,
+    requestText,
+    diff: diffText,
+    approval: true,
+    renderActions: resolution !== "pending"
+      ? null
+      : () => {
+          const actions = document.createElement("div");
+          actions.className = "timeline-entry-actions";
+
+          const approveButton = document.createElement("button");
+          approveButton.className = "solid-button";
+          approveButton.textContent = "Approve";
+          approveButton.addEventListener("click", async () => {
+            await respondToApproval(approval, true);
+          });
+
+          const denyButton = document.createElement("button");
+          denyButton.className = "ghost-button";
+          denyButton.textContent = "Deny";
+          denyButton.addEventListener("click", async () => {
+            await respondToApproval(approval, false);
+          });
+
+          actions.append(approveButton, denyButton);
+          return actions;
+        },
   };
 }
 
@@ -1583,7 +1429,6 @@ async function deleteSessionFromUi(session) {
   if (state.currentSessionId === session.id) {
     state.currentSessionId = null;
     resetTranscriptView();
-    resetLogPanels();
     resetProgress();
   }
 
@@ -1643,6 +1488,8 @@ function resetTranscriptView() {
   state.threadContexts = new Map();
   state.assistantStates = new Map();
   state.runThreadMap = new Map();
+  state.activityEntryMap = new Map();
+  state.workspaceThreadId = null;
   state.pendingThreadId = null;
   state.currentRunId = null;
   state.nextThreadIndex = 1;
@@ -1650,7 +1497,6 @@ function resetTranscriptView() {
 
 function renderSessionTranscript(events) {
   resetTranscriptView();
-  resetLogPanels();
 
   let currentThreadId = null;
   let currentRunId = null;
@@ -1689,29 +1535,18 @@ function renderSessionTranscript(events) {
     }
 
     if (event.type === "tool_call") {
-      if (COMMAND_TOOL_NAMES.has(event.toolName)) {
-        upsertCommandLogEntry({
-          id: event.callId,
-          title: event.toolName,
-          meta: `Started ${formatTime(event.timestamp)}`,
-          status: "pending",
-          statusLabel: "Pending",
-          summary: summarizeArguments(event.toolName, event.input || {}),
-          detail: "",
-          diff: "",
-        });
-      } else {
-        upsertInlineActivityEntry(currentThreadId, {
-          id: event.callId,
-          title: event.toolName,
-          meta: `Started ${formatTime(event.timestamp)}`,
-          status: "pending",
-          statusLabel: "Pending",
-          summary: summarizePendingTool(event.toolName, event.input || {}),
-          detail: "",
-          diff: "",
-        });
-      }
+      upsertTimelineEntry(currentThreadId, {
+        id: event.callId,
+        category: COMMAND_TOOL_NAMES.has(event.toolName) ? "commands" : "tools",
+        label: COMMAND_TOOL_NAMES.has(event.toolName) ? "Command" : "Tool",
+        title: event.toolName,
+        meta: `Started ${formatTime(event.timestamp)}`,
+        status: "pending",
+        statusLabel: "Pending",
+        summary: summarizePendingTool(event.toolName, event.input || {}),
+        detail: "",
+        diff: "",
+      });
       continue;
     }
 
@@ -1728,14 +1563,14 @@ function renderSessionTranscript(events) {
           : summarizeNonCommandTool(event.toolName, event.result, event.result.ok ? "" : event.result.error.message),
         detail: typeof event.result.content === "string" ? truncateText(event.result.content, 900) : "",
         diff,
+        category: COMMAND_TOOL_NAMES.has(event.toolName) ? "commands" : "tools",
+        label: COMMAND_TOOL_NAMES.has(event.toolName) ? "Command" : "Tool",
       };
-      if (COMMAND_TOOL_NAMES.has(event.toolName)) {
-        upsertCommandLogEntry(entry);
-      } else {
-        upsertInlineActivityEntry(currentThreadId, entry);
-      }
+      upsertTimelineEntry(currentThreadId, entry);
     }
   }
+
+  applyActivityFilters();
 }
 
 function formatTokenCount(value) {
@@ -1935,8 +1770,11 @@ async function bootstrap() {
     }
     const payload = await desktopApi.getBootstrap();
     applyConfigToUi(payload.cwd, payload.config, payload.sessions, payload.modelOptions);
-    renderApprovals();
-    resetLogPanels();
+    if (state.workspaceThreadId) {
+      updateThreadContext(state.workspaceThreadId, {
+        subtitle: formatWorkspaceLabel(payload.cwd),
+      });
+    }
     resetProgress();
     setStatus(payload.hasApiKey ? "Ready for the next message." : "MODEL_ACCESS_KEY is not set.");
     appendDebug(`bootstrap:ready cwd=${payload.cwd} hasApiKey=${String(payload.hasApiKey)}`);
@@ -1955,7 +1793,7 @@ async function reloadWorkspaceState() {
     const payload = await desktopApi.getBootstrap(cwd);
     applyConfigToUi(payload.cwd, payload.config, payload.sessions, payload.modelOptions);
     resetTranscriptView();
-    resetLogPanels();
+    ensureWorkspaceThread();
     resetProgress();
     setStatus(payload.hasApiKey ? "Workspace ready." : "MODEL_ACCESS_KEY is not set.");
   } catch (error) {
@@ -2130,10 +1968,8 @@ if (desktopApi) {
 
     if (payload.type === "tool-call") {
       const threadId = state.runThreadMap.get(payload.runId) ?? state.pendingThreadId;
-      if (COMMAND_TOOL_NAMES.has(payload.toolCall.name)) {
-        upsertCommandLogEntry(createPendingToolEntry(payload));
-      } else if (threadId) {
-        upsertInlineActivityEntry(threadId, createPendingToolEntry(payload));
+      if (threadId) {
+        upsertTimelineEntry(threadId, createPendingToolEntry(payload));
       }
       updateProgress({
         phase: "tool-call",
@@ -2144,10 +1980,8 @@ if (desktopApi) {
 
     if (payload.type === "tool-result") {
       const threadId = state.runThreadMap.get(payload.runId) ?? state.pendingThreadId;
-      if (COMMAND_TOOL_NAMES.has(payload.toolCall.name)) {
-        upsertCommandLogEntry(createFinishedToolEntry(payload));
-      } else if (threadId) {
-        upsertInlineActivityEntry(threadId, createFinishedToolEntry(payload));
+      if (threadId) {
+        upsertTimelineEntry(threadId, createFinishedToolEntry(payload));
       }
       updateProgress({
         phase: payload.result?.ok ? "tool-result" : "tool-error",
@@ -2157,8 +1991,17 @@ if (desktopApi) {
     }
 
     if (payload.type === "approval-request") {
-      state.approvals.unshift(payload);
-      renderApprovals();
+      const threadId =
+        (payload.runId ? state.runThreadMap.get(payload.runId) : null) ??
+        (state.currentRunId ? state.runThreadMap.get(state.currentRunId) : null) ??
+        state.pendingThreadId ??
+        ensureWorkspaceThread();
+      const approval = {
+        ...payload,
+        threadId,
+      };
+      state.approvals.unshift(approval);
+      upsertTimelineEntry(threadId, createApprovalTimelineEntry(approval));
       updateProgress({
         phase: "awaiting-approval",
         activeToolName: payload.toolName,
@@ -2250,8 +2093,16 @@ if (desktopApi) {
     if (payload.type === "run-cancelled") {
       setRunning(false);
       state.cancelRequested = false;
+      for (const approval of state.approvals) {
+        upsertTimelineEntry(approval.threadId, {
+          ...createApprovalTimelineEntry(approval),
+          status: "info",
+          statusLabel: "Cancelled",
+          summary: `${approval.toolName} did not run because the session was cancelled.`,
+          renderActions: null,
+        });
+      }
       state.approvals = [];
-      renderApprovals();
       const threadId = state.currentRunId ? state.runThreadMap.get(state.currentRunId) : state.pendingThreadId;
       if (threadId) {
         updateThreadContext(threadId, {
@@ -2318,10 +2169,6 @@ elements.cancelButton.addEventListener("click", async () => {
   await desktopApi.cancelRun();
 });
 
-elements.detailPaneToggle.addEventListener("click", () => {
-  toggleRightPane();
-});
-
 elements.progressToggle.addEventListener("click", () => {
   toggleRunDetails();
 });
@@ -2371,17 +2218,16 @@ elements.promptInput.addEventListener("keydown", async (event) => {
   }
 });
 
-bootstrap();
 setRunning(false);
-resetLogPanels();
+resetTranscriptView();
+ensureWorkspaceThread();
 resetProgress();
 renderPresetButtons();
+renderActivityFilters();
 setPreset(state.preset);
-loadPaneWidthPreference();
-loadPaneCollapsedPreference();
 loadRunDetailsPreference();
-initializeResizeHandle();
+appendDebug(`desktopApi:${desktopApi ? "available" : "missing"}`);
+bootstrap();
 window.addEventListener("resize", () => {
-  applyRightPaneWidth(state.rightPaneWidth);
   fitAllSessionCards();
 });

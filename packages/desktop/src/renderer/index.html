@@ -31,17 +31,6 @@
       </aside>
 
       <main class="main-pane">
-        <button
-          id="detailPaneToggle"
-          class="detail-pane-toggle"
-          type="button"
-          aria-label="Collapse right sidebar"
-          aria-expanded="true"
-          title="Toggle command log and debug sidebar"
-        >
-          <span class="detail-pane-toggle-icon" aria-hidden="true">></span>
-        </button>
-
         <header class="topbar">
           <div class="topbar-copy">
             <p class="topbar-kicker">Session Controls</p>
@@ -92,18 +81,16 @@
           <div id="progressChips" class="progress-chips"></div>
         </section>
 
-        <section id="transcript" class="transcript"></section>
-
-        <div id="approvalModal" class="approval-modal hidden" aria-hidden="true">
-          <div class="approval-modal-backdrop"></div>
-          <div class="approval-modal-card" role="dialog" aria-modal="true" aria-labelledby="approvalModalTitle">
-            <div class="approval-modal-header">
-              <h2 id="approvalModalTitle">Approval Needed</h2>
-              <p id="approvalModalSubtitle" class="approval-modal-subtitle">Review the pending action before the run continues.</p>
+        <section class="timeline-shell">
+          <div class="timeline-toolbar">
+            <div class="timeline-toolbar-copy">
+              <p class="timeline-kicker">Run Timeline</p>
+              <p class="timeline-subtle">One chronological rail for conversation, tools, commands, and debug.</p>
             </div>
-            <div id="approvalList" class="approval-list approval-modal-list"></div>
+            <div id="activityFilters" class="activity-filters" aria-label="Timeline filters"></div>
           </div>
-        </div>
+          <section id="transcript" class="transcript activity-rail"></section>
+        </section>
 
         <section id="composerForm" class="composer">
           <div class="composer-toolbar">
@@ -117,39 +104,10 @@
           </div>
         </section>
       </main>
-
-      <div
-        id="detailResizeHandle"
-        class="resize-handle"
-        role="separator"
-        aria-orientation="vertical"
-        aria-label="Resize right sidebar"
-      ></div>
-
-      <aside class="detail-pane">
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Command Log</h2>
-          </div>
-          <div id="commandLogList" class="activity-list panel-scroll empty-state">Command activity will appear here.</div>
-        </section>
-
-        <section class="panel">
-          <div class="panel-header">
-            <h2>Debug Console</h2>
-          </div>
-          <pre id="debugConsole" class="debug-console panel-scroll">Desktop event log will appear here.</pre>
-        </section>
-      </aside>
     </div>
-    <pre id="diffViewer" class="visually-hidden">No diff selected.</pre>
     <script>
       window.addEventListener("error", (event) => {
-        const debugConsole = document.getElementById("debugConsole");
-        if (debugConsole) {
-          const prefix = debugConsole.textContent === "Desktop event log will appear here." ? "" : "\n";
-          debugConsole.textContent = `${debugConsole.textContent === "Desktop event log will appear here." ? "" : debugConsole.textContent}${prefix}[startup-error] ${event.message}`;
-        }
+        console.error("[startup-error]", event.message);
       });
     </script>
     <script src="./app.js"></script>
