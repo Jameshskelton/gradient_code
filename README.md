@@ -191,7 +191,7 @@ npm install
 Copy `env.example` to `.env`:
 
 ```bash
-cp .env.example .env
+cp env.example .env
 ```
 
 Then set:
@@ -200,7 +200,7 @@ Then set:
 - optionally `GRADIENT_BASE_URL`
 - optionally `GRADIENT_MODEL`
 
-Current example values are in [.env.example](./.env.example).
+Current example values are in [env.example](./.env.example).
 
 ## Running The App
 
