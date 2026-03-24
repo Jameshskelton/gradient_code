@@ -41,6 +41,7 @@ const PRESET_OPTIONS = [
 const PRESET_BY_ID = new Map(PRESET_OPTIONS.map((option) => [option.id, option]));
 
 const RUN_DETAILS_COLLAPSED_KEY = "gradient-code:run-details-collapsed";
+const TOPBAR_COLLAPSED_KEY = "gradient-code:topbar-collapsed";
 const ACTIVITY_FILTERS = [
   { id: "conversation", label: "Conversation", activeByDefault: true },
   { id: "tools", label: "Tools", activeByDefault: true },
@@ -59,6 +60,9 @@ const state = {
   sessions: [],
   waitingTimer: null,
   runDetailsCollapsed: true,
+  topbarCollapsed: false,
+  topbarCollapsedPreference: false,
+  topbarQuickEditor: null,
   cancelRequested: false,
   progress: createDefaultProgressState(),
   threadContexts: new Map(),
@@ -123,12 +127,22 @@ function createDesktopApiFallback() {
 const desktopApi = window.gradientCodeDesktop ?? createDesktopApiFallback();
 
 const elements = {
+  topbar: document.getElementById("topbar"),
   workspaceInput: document.getElementById("workspaceInput"),
   modelInput: document.getElementById("modelInput"),
   maxTurnsInput: document.getElementById("maxTurnsInput"),
   approveAllToggle: document.getElementById("approveAllToggle"),
   previewWritesToggle: document.getElementById("previewWritesToggle"),
   saveConfigButton: document.getElementById("saveConfigButton"),
+  topbarSummary: document.getElementById("topbarSummary"),
+  topbarCollapseButton: document.getElementById("topbarCollapseButton"),
+  topbarExpandButton: document.getElementById("topbarExpandButton"),
+  topbarQuickEditor: document.getElementById("topbarQuickEditor"),
+  topbarQuickModelField: document.getElementById("topbarQuickModelField"),
+  topbarQuickTurnsField: document.getElementById("topbarQuickTurnsField"),
+  collapsedModelInput: document.getElementById("collapsedModelInput"),
+  collapsedTurnsInput: document.getElementById("collapsedTurnsInput"),
+  topbarQuickCloseButton: document.getElementById("topbarQuickCloseButton"),
   statusBar: document.getElementById("statusBar"),
   statusBarText: document.getElementById("statusBarText"),
   progressToggle: document.getElementById("progressToggle"),
@@ -212,6 +226,171 @@ function toggleRunDetails() {
   applyRunDetailsCollapsed(!state.runDetailsCollapsed);
   saveRunDetailsPreference();
   renderProgress();
+}
+
+function hasTopbarSelections() {
+  const workspace = elements.workspaceInput.value.trim() || state.cwd;
+  const model = elements.modelInput.value || state.model;
+  return Boolean(String(workspace || "").trim() && String(model || "").trim());
+}
+
+function createTopbarSummaryChip(text, options = {}) {
+  const chip = document.createElement("button");
+  chip.type = "button";
+  chip.className = "topbar-summary-chip";
+  if (options.primary) {
+    chip.classList.add("is-primary");
+  }
+  if (options.active) {
+    chip.classList.add("is-active");
+  }
+  chip.textContent = text;
+  if (options.title) {
+    chip.title = options.title;
+  }
+  if (options.action) {
+    chip.dataset.action = options.action;
+    chip.setAttribute("aria-pressed", String(Boolean(options.active)));
+    chip.addEventListener("click", async () => {
+      await handleTopbarSummaryAction(options.action);
+    });
+  }
+  return chip;
+}
+
+function renderTopbarSummary() {
+  const workspace = elements.workspaceInput.value.trim() || state.cwd;
+  const model = elements.modelInput.value || state.model;
+  const turns = Math.max(1, Number.parseInt(elements.maxTurnsInput.value || "12", 10) || 12);
+  const approvalLabel = elements.approveAllToggle.checked ? "Approve all" : "Manual approvals";
+  const writesLabel = elements.previewWritesToggle.checked ? "Preview writes" : "Direct writes";
+
+  elements.topbarSummary.textContent = "";
+  elements.topbarSummary.append(
+    createTopbarSummaryChip(workspace ? formatWorkspaceLabel(workspace) : "Choose workspace", {
+      action: "workspace",
+      primary: true,
+      title: workspace || "No workspace selected",
+    }),
+    createTopbarSummaryChip(model || "Choose model", {
+      action: "model",
+      active: state.topbarQuickEditor === "model",
+    }),
+    createTopbarSummaryChip(`${turns} turns`, {
+      action: "turns",
+      active: state.topbarQuickEditor === "turns",
+    }),
+    createTopbarSummaryChip(approvalLabel, {
+      action: "approveAll",
+      active: elements.approveAllToggle.checked,
+    }),
+    createTopbarSummaryChip(writesLabel, {
+      action: "previewWrites",
+      active: elements.previewWritesToggle.checked,
+    }),
+  );
+
+  const canCollapse = hasTopbarSelections();
+  elements.topbarCollapseButton.disabled = !canCollapse;
+  elements.topbarExpandButton.disabled = !canCollapse;
+}
+
+function renderTopbarQuickEditor() {
+  const showQuickEditor =
+    state.topbarCollapsed && (state.topbarQuickEditor === "model" || state.topbarQuickEditor === "turns");
+
+  elements.topbarQuickEditor.classList.toggle("hidden", !showQuickEditor);
+  elements.topbarQuickModelField.classList.toggle("hidden", state.topbarQuickEditor !== "model");
+  elements.topbarQuickTurnsField.classList.toggle("hidden", state.topbarQuickEditor !== "turns");
+
+  if (state.topbarQuickEditor === "model") {
+    elements.collapsedModelInput.value = elements.modelInput.value || state.model || "";
+  }
+
+  if (state.topbarQuickEditor === "turns") {
+    elements.collapsedTurnsInput.value = elements.maxTurnsInput.value || "12";
+  }
+}
+
+function setTopbarQuickEditor(nextEditor) {
+  const normalized = nextEditor === "model" || nextEditor === "turns" ? nextEditor : null;
+  state.topbarQuickEditor = state.topbarQuickEditor === normalized ? null : normalized;
+  syncTopbarState();
+
+  if (state.topbarQuickEditor === "model") {
+    window.requestAnimationFrame(() => {
+      elements.collapsedModelInput.focus();
+    });
+  }
+
+  if (state.topbarQuickEditor === "turns") {
+    window.requestAnimationFrame(() => {
+      elements.collapsedTurnsInput.focus();
+      elements.collapsedTurnsInput.select();
+    });
+  }
+}
+
+async function handleTopbarSummaryAction(action) {
+  if (action === "workspace") {
+    state.topbarQuickEditor = null;
+    syncTopbarState();
+    try {
+      await chooseWorkspace();
+    } catch (error) {
+      setStatus(toErrorMessage(error));
+    }
+    return;
+  }
+
+  if (action === "model" || action === "turns") {
+    setTopbarQuickEditor(action);
+    return;
+  }
+
+  if (action === "approveAll") {
+    elements.approveAllToggle.checked = !elements.approveAllToggle.checked;
+    syncTopbarState();
+    return;
+  }
+
+  if (action === "previewWrites") {
+    elements.previewWritesToggle.checked = !elements.previewWritesToggle.checked;
+    syncTopbarState();
+  }
+}
+
+function applyTopbarCollapsed(collapsed) {
+  const next = Boolean(collapsed) && hasTopbarSelections();
+  state.topbarCollapsed = next;
+  if (!next) {
+    state.topbarQuickEditor = null;
+  }
+  elements.topbar.classList.toggle("is-collapsed", next);
+  elements.topbarCollapseButton.setAttribute("aria-expanded", String(!next));
+  elements.topbarExpandButton.setAttribute("aria-expanded", String(!next));
+}
+
+function loadTopbarPreference() {
+  const raw = window.localStorage.getItem(TOPBAR_COLLAPSED_KEY);
+  state.topbarCollapsedPreference = raw === "true";
+  applyTopbarCollapsed(state.topbarCollapsedPreference);
+}
+
+function saveTopbarPreference() {
+  window.localStorage.setItem(TOPBAR_COLLAPSED_KEY, String(state.topbarCollapsedPreference));
+}
+
+function setTopbarCollapsed(collapsed) {
+  state.topbarCollapsedPreference = Boolean(collapsed);
+  applyTopbarCollapsed(state.topbarCollapsedPreference);
+  saveTopbarPreference();
+}
+
+function syncTopbarState() {
+  renderTopbarSummary();
+  applyTopbarCollapsed(state.topbarCollapsedPreference);
+  renderTopbarQuickEditor();
 }
 
 function toErrorMessage(error) {
@@ -1436,9 +1615,9 @@ async function deleteSessionFromUi(session) {
   setStatus(`Deleted session: ${truncateText(title, 80)}`);
 }
 
-function populateModelOptions(options, selectedModel) {
+function populateModelSelect(selectElement, options, selectedModel) {
+  selectElement.textContent = "";
   const nextOptions = Array.isArray(options) ? options : [];
-  elements.modelInput.textContent = "";
 
   const grouped = new Map();
   for (const option of nextOptions) {
@@ -1459,12 +1638,19 @@ function populateModelOptions(options, selectedModel) {
       group.append(element);
     }
 
-    elements.modelInput.append(group);
+    selectElement.append(group);
   }
 
   const fallbackModel = nextOptions[0]?.id || "kimi-k2.5";
   const selectedValue = nextOptions.some((option) => option.id === selectedModel) ? selectedModel : fallbackModel;
-  elements.modelInput.value = selectedValue;
+  selectElement.value = selectedValue;
+  return selectedValue;
+}
+
+function populateModelOptions(options, selectedModel) {
+  const nextOptions = Array.isArray(options) ? options : [];
+  const selectedValue = populateModelSelect(elements.modelInput, nextOptions, selectedModel);
+  populateModelSelect(elements.collapsedModelInput, nextOptions, selectedValue);
   state.model = selectedValue;
 }
 
@@ -1479,6 +1665,7 @@ function applyConfigToUi(cwd, config, sessions, modelOptions) {
   elements.previewWritesToggle.checked = config.previewEdits !== false;
   populateModelOptions(state.modelOptions, config.model || state.model || "kimi-k2.5");
   setPreset(config.preset || state.preset || "default");
+  syncTopbarState();
 
   renderSessions();
 }
@@ -2173,6 +2360,19 @@ elements.progressToggle.addEventListener("click", () => {
   toggleRunDetails();
 });
 
+elements.topbarCollapseButton.addEventListener("click", () => {
+  setTopbarCollapsed(true);
+});
+
+elements.topbarExpandButton.addEventListener("click", () => {
+  setTopbarCollapsed(false);
+});
+
+elements.topbarQuickCloseButton.addEventListener("click", () => {
+  state.topbarQuickEditor = null;
+  syncTopbarState();
+});
+
 elements.refreshSessionsButton.addEventListener("click", async () => {
   await reloadWorkspaceState();
   setStatus("Workspace state refreshed.");
@@ -2187,6 +2387,7 @@ elements.saveConfigButton.addEventListener("click", async () => {
 });
 
 elements.workspaceInput.addEventListener("change", async () => {
+  syncTopbarState();
   await reloadWorkspaceState();
 });
 
@@ -2211,6 +2412,36 @@ elements.workspaceInput.addEventListener("keydown", async (event) => {
   }
 });
 
+elements.modelInput.addEventListener("change", () => {
+  state.model = elements.modelInput.value || state.model;
+  syncTopbarState();
+});
+
+elements.collapsedModelInput.addEventListener("change", () => {
+  elements.modelInput.value = elements.collapsedModelInput.value;
+  state.model = elements.collapsedModelInput.value || state.model;
+  syncTopbarState();
+});
+
+elements.maxTurnsInput.addEventListener("input", () => {
+  syncTopbarState();
+});
+
+elements.collapsedTurnsInput.addEventListener("input", () => {
+  const nextValue = String(Math.max(1, Number.parseInt(elements.collapsedTurnsInput.value || "12", 10) || 12));
+  elements.collapsedTurnsInput.value = nextValue;
+  elements.maxTurnsInput.value = nextValue;
+  syncTopbarState();
+});
+
+elements.approveAllToggle.addEventListener("change", () => {
+  syncTopbarState();
+});
+
+elements.previewWritesToggle.addEventListener("change", () => {
+  syncTopbarState();
+});
+
 elements.promptInput.addEventListener("keydown", async (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     event.preventDefault();
@@ -2225,7 +2456,9 @@ resetProgress();
 renderPresetButtons();
 renderActivityFilters();
 setPreset(state.preset);
+syncTopbarState();
 loadRunDetailsPreference();
+loadTopbarPreference();
 appendDebug(`desktopApi:${desktopApi ? "available" : "missing"}`);
 bootstrap();
 window.addEventListener("resize", () => {

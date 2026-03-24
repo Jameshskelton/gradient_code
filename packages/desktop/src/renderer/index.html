@@ -31,29 +31,49 @@
       </aside>
 
       <main class="main-pane">
-        <header class="topbar">
-          <div class="topbar-copy">
-            <p class="topbar-kicker">Session Controls</p>
-            <p class="topbar-subtle">Pick a workspace, model, and guardrails, then work from the conversation below.</p>
-          </div>
-          <div class="topbar-controls">
-            <div class="field-group grow">
-              <label for="workspaceInput">Workspace</label>
-              <input id="workspaceInput" class="workspace-picker" type="text" readonly placeholder="Click to choose a workspace folder" />
+        <header id="topbar" class="topbar">
+          <div class="topbar-expanded-row">
+            <div class="topbar-pill">
+              <p class="topbar-kicker">Session Controls</p>
             </div>
-            <div class="field-group">
-              <label for="modelInput">Model</label>
-              <select id="modelInput"></select>
-            </div>
-            <div class="field-group compact">
-              <label for="maxTurnsInput">Turns</label>
-              <input id="maxTurnsInput" type="number" min="1" value="12" />
-            </div>
-            <div class="toggle-group">
-              <label><input id="approveAllToggle" type="checkbox" /> Approve All</label>
-              <label><input id="previewWritesToggle" type="checkbox" checked /> Preview Writes</label>
+            <div class="topbar-controls">
+              <div class="field-group grow topbar-field">
+                <label for="workspaceInput">Workspace</label>
+                <input id="workspaceInput" class="workspace-picker" type="text" readonly placeholder="Click to choose a workspace folder" />
+              </div>
+              <div class="field-group topbar-field">
+                <label for="modelInput">Model</label>
+                <select id="modelInput"></select>
+              </div>
+              <div class="field-group compact topbar-field">
+                <label for="maxTurnsInput">Turns</label>
+                <input id="maxTurnsInput" type="number" min="1" value="12" />
+              </div>
+              <div class="toggle-group">
+                <label><input id="approveAllToggle" type="checkbox" /> Approve All</label>
+                <label><input id="previewWritesToggle" type="checkbox" checked /> Preview Writes</label>
+              </div>
             </div>
             <button id="saveConfigButton" class="solid-button">Save Defaults</button>
+            <button id="topbarCollapseButton" type="button" class="topbar-toggle-button" aria-expanded="true">Collapse</button>
+          </div>
+          <div class="topbar-collapsed-row">
+            <div class="topbar-pill">
+              <p class="topbar-kicker">Session Controls</p>
+            </div>
+            <div id="topbarSummary" class="topbar-summary" aria-live="polite"></div>
+            <button id="topbarExpandButton" type="button" class="topbar-toggle-button" aria-expanded="false">Edit</button>
+          </div>
+          <div id="topbarQuickEditor" class="topbar-quick-editor hidden">
+            <label id="topbarQuickModelField" class="topbar-quick-field hidden" for="collapsedModelInput">
+              <span>Model</span>
+              <select id="collapsedModelInput"></select>
+            </label>
+            <label id="topbarQuickTurnsField" class="topbar-quick-field hidden" for="collapsedTurnsInput">
+              <span>Turns</span>
+              <input id="collapsedTurnsInput" type="number" min="1" value="12" />
+            </label>
+            <button id="topbarQuickCloseButton" type="button" class="ghost-button">Done</button>
           </div>
         </header>
 
