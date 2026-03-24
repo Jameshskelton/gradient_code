@@ -1,0 +1,14 @@
+{
+  "name": "@gradient-code/cli",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "@gradient-code/core": "0.1.0",
+    "@gradient-code/provider-gradient": "0.1.0",
+    "@gradient-code/shared": "0.1.0",
+    "@gradient-code/tools": "0.1.0"
+  }
+}

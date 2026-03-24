@@ -1,0 +1,25 @@
+{
+  "name": "gradient-code",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "gradient_code": "./bin/gradient_code.js"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "dev": "tsx packages/cli/src/index.ts",
+    "desktop": "electron packages/desktop/dist/main.js",
+    "start": "node ./bin/gradient_code.js",
+    "typecheck": "tsc -b --pretty false"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "electron": "^36.3.2",
+    "tsx": "^4.20.0",
+    "typescript": "^5.8.3"
+  }
+}

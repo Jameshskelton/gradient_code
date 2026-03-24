@@ -1,0 +1,29 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "baseUrl": ".",
+    "paths": {
+      "@gradient-code/shared": [
+        "packages/shared/src/index.ts"
+      ],
+      "@gradient-code/provider-gradient": [
+        "packages/provider-gradient/src/index.ts"
+      ],
+      "@gradient-code/tools": [
+        "packages/tools/src/index.ts"
+      ],
+      "@gradient-code/core": [
+        "packages/core/src/index.ts"
+      ]
+    },
+    "strict": true,
+    "skipLibCheck": true,
+    "declaration": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "resolveJsonModule": true,
+    "esModuleInterop": true
+  }
+}

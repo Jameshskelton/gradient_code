@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gradient Code</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <div class="brand-block">
+          <p class="eyebrow">Desktop Shell</p>
+          <div class="brand-row">
+            <img
+              class="brand-logo"
+              src="../../../../DigitalOcean_logo.svg.png"
+              alt="DigitalOcean logo"
+            />
+            <h1>Gradient Code</h1>
+          </div>
+          <p class="subtle">Shared runtime, GUI approvals, session history.</p>
+        </div>
+        <div class="sidebar-section sidebar-scroll-section">
+          <div class="sidebar-header">
+            <h2>Sessions</h2>
+            <button id="refreshSessionsButton" class="ghost-button">Refresh</button>
+          </div>
+          <div id="sessionList" class="session-list"></div>
+        </div>
+      </aside>
+
+      <main class="main-pane">
+        <button
+          id="detailPaneToggle"
+          class="detail-pane-toggle"
+          type="button"
+          aria-label="Collapse right sidebar"
+          aria-expanded="true"
+          title="Toggle command log and debug sidebar"
+        >
+          <span class="detail-pane-toggle-icon" aria-hidden="true">></span>
+        </button>
+
+        <header class="topbar">
+          <div class="topbar-copy">
+            <p class="topbar-kicker">Session Controls</p>
+            <p class="topbar-subtle">Pick a workspace, model, and guardrails, then work from the conversation below.</p>
+          </div>
+          <div class="topbar-controls">
+            <div class="field-group grow">
+              <label for="workspaceInput">Workspace</label>
+              <input id="workspaceInput" class="workspace-picker" type="text" readonly placeholder="Click to choose a workspace folder" />
+            </div>
+            <div class="field-group">
+              <label for="modelInput">Model</label>
+              <select id="modelInput"></select>
+            </div>
+            <div class="field-group compact">
+              <label for="maxTurnsInput">Turns</label>
+              <input id="maxTurnsInput" type="number" min="1" value="12" />
+            </div>
+            <div class="toggle-group">
+              <label><input id="approveAllToggle" type="checkbox" /> Approve All</label>
+              <label><input id="previewWritesToggle" type="checkbox" checked /> Preview Writes</label>
+            </div>
+            <button id="saveConfigButton" class="solid-button">Save Defaults</button>
+          </div>
+        </header>
+
+        <section id="statusBar" class="status-bar">
+          <span id="statusBarText">Ready.</span>
+          <button
+            id="progressToggle"
+            class="progress-toggle hidden"
+            type="button"
+            aria-expanded="false"
+            aria-controls="progressStrip"
+          >
+            Show details
+          </button>
+        </section>
+
+        <section id="progressStrip" class="progress-strip">
+          <div class="progress-copy">
+            <div id="progressTitle" class="progress-title">Ready for a new run.</div>
+            <div id="progressSubtitle" class="progress-subtitle">Tool and token progress will appear here.</div>
+          </div>
+          <div class="progress-bar-track" aria-hidden="true">
+            <div id="progressBarFill" class="progress-bar-fill"></div>
+          </div>
+          <div id="progressChips" class="progress-chips"></div>
+        </section>
+
+        <section id="transcript" class="transcript"></section>
+
+        <div id="approvalModal" class="approval-modal hidden" aria-hidden="true">
+          <div class="approval-modal-backdrop"></div>
+          <div class="approval-modal-card" role="dialog" aria-modal="true" aria-labelledby="approvalModalTitle">
+            <div class="approval-modal-header">
+              <h2 id="approvalModalTitle">Approval Needed</h2>
+              <p id="approvalModalSubtitle" class="approval-modal-subtitle">Review the pending action before the run continues.</p>
+            </div>
+            <div id="approvalList" class="approval-list approval-modal-list"></div>
+          </div>
+        </div>
+
+        <section id="composerForm" class="composer">
+          <div class="composer-toolbar">
+            <div id="presetChips" class="preset-chips" role="tablist" aria-label="Task mode"></div>
+          </div>
+          <textarea id="promptInput" placeholder="Ask about the codebase, request a review, make a plan, or edit code."></textarea>
+          <div class="composer-actions">
+            <button id="resumeButton" type="button" class="ghost-button">Resume Last</button>
+            <button id="cancelButton" type="button" class="ghost-button">Cancel</button>
+            <button id="sendButton" type="button" class="solid-button">Send</button>
+          </div>
+        </section>
+      </main>
+
+      <div
+        id="detailResizeHandle"
+        class="resize-handle"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize right sidebar"
+      ></div>
+
+      <aside class="detail-pane">
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Command Log</h2>
+          </div>
+          <div id="commandLogList" class="activity-list panel-scroll empty-state">Command activity will appear here.</div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-header">
+            <h2>Debug Console</h2>
+          </div>
+          <pre id="debugConsole" class="debug-console panel-scroll">Desktop event log will appear here.</pre>
+        </section>
+      </aside>
+    </div>
+    <pre id="diffViewer" class="visually-hidden">No diff selected.</pre>
+    <script>
+      window.addEventListener("error", (event) => {
+        const debugConsole = document.getElementById("debugConsole");
+        if (debugConsole) {
+          const prefix = debugConsole.textContent === "Desktop event log will appear here." ? "" : "\n";
+          debugConsole.textContent = `${debugConsole.textContent === "Desktop event log will appear here." ? "" : debugConsole.textContent}${prefix}[startup-error] ${event.message}`;
+        }
+      });
+    </script>
+    <script src="./app.js"></script>
+  </body>
+  </html>
