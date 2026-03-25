@@ -2014,10 +2014,118 @@ body.command-palette-open {
 }
 
 .timeline-entry-compact {
-  width: min(86%, 820px);
-  padding: 13px 15px;
-  gap: 9px;
+  width: min(84%, 780px);
+  padding: 12px 14px;
+  gap: 8px;
   box-shadow: none;
+}
+
+.timeline-entry-utility {
+  min-height: 0;
+  padding: 11px 13px;
+  gap: 8px;
+  border-radius: 18px;
+  box-shadow: 0 10px 22px rgba(16, 33, 63, 0.05);
+}
+
+.timeline-entry-utility .panel-entry-label {
+  padding: 3px 8px;
+  font-size: 10px;
+}
+
+.timeline-entry-utility .panel-entry-header {
+  gap: 8px;
+}
+
+.timeline-entry-utility .panel-entry-title strong {
+  font-size: 15px;
+  line-height: 1.24;
+}
+
+.timeline-entry-utility .panel-entry-meta {
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.timeline-entry-utility .panel-entry-status {
+  padding: 4px 7px;
+  font-size: 10px;
+}
+
+.timeline-entry-utility .panel-entry-summary {
+  font-size: 13px;
+  line-height: 1.42;
+}
+
+.timeline-entry-utility .panel-entry-files {
+  gap: 6px;
+}
+
+.timeline-entry-inline-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 8px;
+  width: 100%;
+}
+
+.timeline-entry-utility .timeline-entry-inline-row > .panel-entry-files,
+.timeline-entry-utility .timeline-entry-inline-row > .timeline-entry-actions {
+  width: auto;
+  flex: 0 1 auto;
+}
+
+.timeline-entry-utility .panel-entry-file-chip {
+  padding: 4px 8px;
+  font-size: 11px;
+}
+
+.timeline-entry-utility .timeline-entry-disclosure {
+  width: auto;
+  flex: 0 1 auto;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.timeline-entry-utility .timeline-entry-disclosure-toggle {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  background: rgba(0, 128, 255, 0.08);
+  font-size: 11px;
+}
+
+.timeline-entry-utility .timeline-entry-disclosure[open] {
+  width: 100%;
+  flex-basis: 100%;
+}
+
+.timeline-entry-utility .panel-entry-detail,
+.timeline-entry-utility .panel-entry-diff {
+  margin-top: 6px;
+  padding: 8px 10px;
+  font-size: 11px;
+}
+
+.timeline-entry-utility .panel-entry-detail {
+  max-height: 120px;
+}
+
+.timeline-entry-utility .panel-entry-diff {
+  max-height: 180px;
+}
+
+.timeline-entry-utility .timeline-entry-actions {
+  gap: 8px;
+  padding-top: 0;
+}
+
+.timeline-entry-utility .timeline-entry-actions .ghost-button,
+.timeline-entry-utility .timeline-entry-actions .solid-button {
+  padding: 7px 11px;
+  font-size: 12px;
 }
 
 .timeline-entry-elevated {

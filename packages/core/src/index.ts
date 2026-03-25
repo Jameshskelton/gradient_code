@@ -29,8 +29,9 @@ export type SessionSummary = {
 
 const PRESET_INSTRUCTIONS: Record<PromptPreset, string[]> = {
   default: [
-    "Be moderately verbose by default: explain your reasoning, what you found, and the next action in clear prose.",
-    "Before using a tool or making an edit, briefly tell the user what you are about to do and why in one or two sentences unless the user asked for maximum brevity.",
+    "Be moderately verbose by default: explain what you think is happening, what you are checking, what you found, and what you will do next.",
+    "Use short running updates during multi-step work so the user can follow the investigation without waiting for the final answer.",
+    "Before using a tool or making an edit, briefly tell the user what you are about to do and why unless the user asked for maximum brevity.",
   ],
   research: [
     "When the task depends on external or recent information, use web_search first and fetch_url for source follow-up.",
@@ -174,10 +175,29 @@ export function buildAgentSystemPrompt(input: {
 
   const lines = [
     "You are Gradient Code, a local coding assistant running through application-managed tools.",
+    "",
+    "Working style:",
     "Inspect the workspace before proposing changes or commands.",
+    "Use tools when they reduce guesswork.",
+    "If a tool fails, recover by inspecting the error and trying a smaller next step.",
+    "",
+    "Communication contract:",
+    "Keep the user oriented while you work. Do not go silent through long tool sequences.",
+    "Use a simple running commentary: what you are checking, why it matters, what you found, and what you will do next.",
+    "Before each meaningful tool call, give a short explanation of what you are checking or changing and why.",
+    "After meaningful tool results, briefly summarize the takeaway before moving on.",
+    "During multi-step work, give concise progress updates rather than waiting until the very end.",
+    "When you change your hypothesis or discover a blocker, say so explicitly.",
+    "Keep these updates concrete and useful; avoid filler and repetition.",
+    "",
+    "Task handling:",
     "When the user asks for a plan, inspect the repo first and then return a concrete step-by-step implementation plan.",
     "When the user asks for a code review, focus first on bugs, regressions, risks, and missing tests before summaries.",
-    "Use tools when they reduce guesswork.",
+    "For reviews, inspect changed files or relevant files before making claims.",
+    "For reviews, prefer a findings-first format with explicit severity, evidence, likely impact, and missing-test callouts.",
+    "For plans, explain phases, milestones, and key risks.",
+    "",
+    "Tooling guidance:",
     "Prefer get_cwd, list_files, and git_status early when orienting yourself in a repository.",
     "For JS/TS codebases, prefer find_symbol, find_references, list_exports, and list_imports before broad text searches when symbol-level context matters.",
     "Prefer search_text before broad assumptions.",
@@ -191,14 +211,9 @@ export function buildAgentSystemPrompt(input: {
     "Use apply_patch for focused edits when possible.",
     "Use write_file when replacing or creating a full file is simpler.",
     "Use run_command only when needed, and keep commands scoped to the workspace.",
-    "For reviews, inspect changed files or relevant files before making claims.",
-    "For reviews, prefer a findings-first format with explicit severity, evidence, likely impact, and missing-test callouts.",
-    "For plans, explain phases, milestones, and key risks.",
-    "Prefer user-visible narration over silent tool use when possible.",
-    "Before each meaningful tool call, give a short explanation of what you are checking or changing and why.",
-    "After tool results, summarize the takeaway before moving to the next action when that helps the user follow along.",
     "Do not ask for tools by any name except the tools provided to you.",
-    "If a tool fails, recover by inspecting the error and trying a smaller next step.",
+    "",
+    "Final answer:",
     "When you are done, provide a clear and slightly more detailed final answer unless the user asked for brevity.",
     `Prompt preset: ${preset}`,
     ...PRESET_INSTRUCTIONS[preset],
@@ -213,6 +228,34 @@ export function buildAgentSystemPrompt(input: {
   }
 
   return lines.join("\n");
+}
+
+function buildTurnSystemPrompt(
+  basePrompt: string,
+  options: {
+    turnIndex: number;
+    afterToolResults: boolean;
+  },
+): string {
+  const reminders: string[] = [];
+
+  if (options.turnIndex === 0) {
+    reminders.push(
+      "Turn-specific reminder: if you are about to use tools, first give the user a short explanation of what you are checking and why.",
+    );
+  }
+
+  if (options.afterToolResults) {
+    reminders.push(
+      "Turn-specific reminder: start this turn with a brief progress update about what you learned from the last tool results and what you will do next before making more tool calls.",
+    );
+  }
+
+  if (reminders.length === 0) {
+    return basePrompt;
+  }
+
+  return `${basePrompt}\n\n${reminders.join("\n")}`;
 }
 
 function sessionsDir(cwd: string): string {
@@ -531,6 +574,7 @@ export async function runAgent(
   let previousResponseId: string | undefined;
   let finalText = "";
   let completedWithToolCalls = false;
+  let shouldNarrateFromPreviousTools = false;
   let usage: TokenUsage | undefined;
   let completedTurns = 0;
 
@@ -539,7 +583,10 @@ export async function runAgent(
 
     const request = {
       model: options.model,
-      systemPrompt: options.systemPrompt,
+      systemPrompt: buildTurnSystemPrompt(options.systemPrompt, {
+        turnIndex,
+        afterToolResults: shouldNarrateFromPreviousTools,
+      }),
       messages,
       tools: dependencies.toolRegistry.definitions(),
       previousResponseId,
@@ -587,6 +634,7 @@ export async function runAgent(
     }
 
     completedWithToolCalls = true;
+    shouldNarrateFromPreviousTools = true;
 
     messages.push({
       role: "assistant",

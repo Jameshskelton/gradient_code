@@ -3345,6 +3345,7 @@ function getAssistantState(threadId) {
     renderedText: "",
     visibleText: "",
     turnText: "",
+    completed: false,
   };
   state.assistantStates.set(threadId, next);
   return next;
@@ -3457,6 +3458,7 @@ function appendAssistantEvent(threadId, text) {
     setBubbleContent(assistantState.bubble, "assistant", merged);
     assistantState.renderedText = merged;
     assistantState.visibleText = merged;
+    assistantState.completed = false;
     return;
   }
 
@@ -3464,6 +3466,7 @@ function appendAssistantEvent(threadId, text) {
   assistantState.renderedText = String(text);
   assistantState.visibleText = String(text);
   assistantState.turnText = "";
+  assistantState.completed = false;
 }
 
 function sealAssistantSegment(threadId) {
@@ -3485,6 +3488,7 @@ function sealAssistantSegment(threadId) {
   assistantState.renderedText = "";
   assistantState.visibleText = "";
   assistantState.turnText = "";
+  assistantState.completed = false;
 }
 
 function buildDisclosure(label, className, text, open = false) {
@@ -3509,9 +3513,13 @@ function createTimelineEntryElement(threadId, entry) {
   card.className = "panel-entry";
   decorateTimelineEntry(card, entry.category);
   card.dataset.entryId = entry.id;
+  const isUtilityEntry = (entry.category === "tools" || entry.category === "commands") && !entry.approval;
 
   if (entry.compact) {
     card.classList.add("timeline-entry-compact");
+  }
+  if (isUtilityEntry) {
+    card.classList.add("timeline-entry-utility");
   }
   if (entry.approval) {
     card.classList.add("timeline-entry-approval", "timeline-entry-elevated");
@@ -3590,6 +3598,11 @@ function createTimelineEntryElement(threadId, entry) {
     card.append(badges);
   }
 
+  const inlineRow = isUtilityEntry ? document.createElement("div") : null;
+  if (inlineRow) {
+    inlineRow.className = "timeline-entry-inline-row";
+  }
+
   if (Array.isArray(entry.files) && entry.files.length > 0) {
     const files = document.createElement("div");
     files.className = "panel-entry-files";
@@ -3606,19 +3619,38 @@ function createTimelineEntryElement(threadId, entry) {
       files.append(chip);
     }
 
-    card.append(files);
+    if (inlineRow) {
+      inlineRow.append(files);
+    } else {
+      card.append(files);
+    }
   }
 
   if (entry.detail) {
-    card.append(buildDisclosure("Raw output", "panel-entry-detail", entry.detail, entry.status === "failed"));
+    const disclosure = buildDisclosure("Raw output", "panel-entry-detail", entry.detail, entry.status === "failed");
+    if (inlineRow) {
+      inlineRow.append(disclosure);
+    } else {
+      card.append(disclosure);
+    }
   }
 
   if (entry.diff) {
-    card.append(buildDisclosure("Diff preview", "panel-entry-diff", entry.diff));
+    const disclosure = buildDisclosure("Diff preview", "panel-entry-diff", entry.diff);
+    if (inlineRow) {
+      inlineRow.append(disclosure);
+    } else {
+      card.append(disclosure);
+    }
   }
 
   if (entry.requestText) {
-    card.append(buildDisclosure("Request details", "panel-entry-detail", entry.requestText, true));
+    const disclosure = buildDisclosure("Request details", "panel-entry-detail", entry.requestText, true);
+    if (inlineRow) {
+      inlineRow.append(disclosure);
+    } else {
+      card.append(disclosure);
+    }
   }
 
   if (entry.diff) {
@@ -3635,7 +3667,15 @@ function createTimelineEntryElement(threadId, entry) {
     });
 
     actions.append(inspectDiffButton);
-    card.append(actions);
+    if (inlineRow) {
+      inlineRow.append(actions);
+    } else {
+      card.append(actions);
+    }
+  }
+
+  if (inlineRow?.childNodes.length) {
+    card.append(inlineRow);
   }
 
   if (typeof entry.renderActions === "function") {
@@ -3717,6 +3757,7 @@ function commitAssistantText(assistantState, text) {
   setBubbleContent(assistantState.bubble, "assistant", nextText);
   assistantState.renderedText = nextText;
   assistantState.visibleText = nextText;
+  assistantState.completed = false;
 }
 
 function chooseMoreCompleteAssistantText(existingText, nextText) {
@@ -4213,6 +4254,7 @@ function createPendingToolEntry(payload) {
     summary: summarizePendingTool(toolCall.name, toolCall.arguments || {}),
     detail: "",
     diff: "",
+    compact: true,
   };
 }
 
@@ -4250,6 +4292,7 @@ function createFinishedToolEntry(payload) {
     diff,
     diffInfo,
     files,
+    compact: true,
   };
 }
 
@@ -5256,6 +5299,9 @@ if (desktopApi) {
 
       const chunk = typeof payload.chunk === "string" ? payload.chunk : "";
       const assistantState = getAssistantState(threadId);
+      if (assistantState.completed) {
+        sealAssistantSegment(threadId);
+      }
       if (!assistantState.bubble && !chunk.trim()) {
         return;
       }
@@ -5289,6 +5335,7 @@ if (desktopApi) {
         commitAssistantText(assistantState, mergedText);
       }
       assistantState.turnText = "";
+      assistantState.completed = true;
       return;
     }
 
@@ -5423,6 +5470,7 @@ if (desktopApi) {
           }
         }
         assistantState.turnText = "";
+        assistantState.completed = true;
 
         updateThreadContext(threadId, {
           subtitle: formatTime(new Date().toISOString()),
