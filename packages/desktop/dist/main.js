@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from "electron";
-import { buildAgentSystemPrompt, deleteSession, loadProjectNotes, ToolRegistry, listSessions, loadGradientCodeConfig, loadLatestSession, loadSession, runAgent, saveGradientCodeConfig, saveSession, writeTranscript, } from "@gradient-code/core";
+import { buildAgentSystemPrompt, deleteSession, loadProjectNotes, resolveProjectNotesPath, ToolRegistry, listSessions, loadGradientCodeConfig, loadLatestSession, loadSession, runAgent, saveGradientCodeConfig, saveSession, writeTranscript, } from "@gradient-code/core";
 import { AVAILABLE_GRADIENT_MODELS, GradientResponsesClient, resolveModelCapabilityProfile, } from "@gradient-code/provider-gradient";
 import { getDefaultTools } from "@gradient-code/tools";
 const __filename = fileURLToPath(import.meta.url);
@@ -243,6 +243,56 @@ async function clearWorkspaceHistory(cwd) {
         sessions: await listSessions(resolvedCwd),
     };
 }
+async function readProjectNotesDocument(cwd, config) {
+    const resolvedCwd = path.resolve(cwd);
+    const filePath = resolveProjectNotesPath(resolvedCwd, config.projectNotesPath);
+    try {
+        const content = await fs.readFile(filePath, "utf8");
+        return {
+            path: filePath,
+            content,
+            exists: true,
+            includeInPrompt: config.includeProjectNotes !== false,
+            isCustomPath: Boolean(config.projectNotesPath),
+        };
+    }
+    catch {
+        return {
+            path: filePath,
+            content: "",
+            exists: false,
+            includeInPrompt: config.includeProjectNotes !== false,
+            isCustomPath: Boolean(config.projectNotesPath),
+        };
+    }
+}
+async function saveProjectNotesDocument(cwd, content, includeInPrompt) {
+    const resolvedCwd = path.resolve(cwd);
+    const currentConfig = await loadGradientCodeConfig(resolvedCwd);
+    const nextConfig = {
+        ...currentConfig,
+        includeProjectNotes: includeInPrompt,
+    };
+    const filePath = resolveProjectNotesPath(resolvedCwd, currentConfig.projectNotesPath);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, String(content ?? ""), "utf8");
+    await saveGradientCodeConfig(resolvedCwd, nextConfig);
+    return readProjectNotesDocument(resolvedCwd, nextConfig);
+}
+async function openProjectNotesFile(cwd) {
+    const resolvedCwd = path.resolve(cwd);
+    const config = await loadGradientCodeConfig(resolvedCwd);
+    const filePath = resolveProjectNotesPath(resolvedCwd, config.projectNotesPath);
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    const handle = await fs.open(filePath, "a");
+    await handle.close();
+    const error = await shell.openPath(filePath);
+    return {
+        ok: error === "",
+        error: error || null,
+        path: filePath,
+    };
+}
 function emitRunProgress(progress) {
     sendEvent({
         type: "run-progress",
@@ -286,11 +336,13 @@ async function getBootstrapPayload(cwd) {
         throw new Error(`Workspace directory not found: ${resolvedCwd}`);
     }
     await maybeLoadEnv(resolvedCwd);
+    const config = await loadGradientCodeConfig(resolvedCwd);
     return {
         cwd: resolvedCwd,
-        config: await loadGradientCodeConfig(resolvedCwd),
+        config,
         sessions: await listSessions(resolvedCwd),
         hasApiKey: Boolean(process.env.MODEL_ACCESS_KEY),
+        projectNotes: await readProjectNotesDocument(resolvedCwd, config),
         modelOptions: AVAILABLE_GRADIENT_MODELS,
     };
 }
@@ -363,7 +415,12 @@ ipcMain.handle("desktop:delete-session", async (_event, cwd, sessionId) => {
     };
 });
 ipcMain.handle("desktop:save-config", async (_event, cwd, config) => {
-    return saveGradientCodeConfig(path.resolve(cwd), config);
+    const resolvedCwd = path.resolve(cwd);
+    const existingConfig = await loadGradientCodeConfig(resolvedCwd);
+    return saveGradientCodeConfig(resolvedCwd, {
+        ...existingConfig,
+        ...config,
+    });
 });
 ipcMain.handle("desktop:list-workspace-tree", async (_event, cwd, relativePath) => {
     return listWorkspaceDirectory(path.resolve(cwd), relativePath ?? "");
@@ -384,6 +441,12 @@ ipcMain.handle("desktop:open-history-folder", async (_event, cwd) => {
 });
 ipcMain.handle("desktop:clear-workspace-history", async (_event, cwd) => {
     return clearWorkspaceHistory(cwd);
+});
+ipcMain.handle("desktop:save-project-notes", async (_event, cwd, payload) => {
+    return saveProjectNotesDocument(path.resolve(cwd), String(payload?.content ?? ""), payload?.includeInPrompt !== false);
+});
+ipcMain.handle("desktop:open-project-notes", async (_event, cwd) => {
+    return openProjectNotesFile(cwd);
 });
 ipcMain.handle("desktop:respond-approval", async (_event, requestId, approved) => {
     sendEvent({
@@ -497,13 +560,12 @@ ipcMain.handle("desktop:start-run", async (_event, payload) => {
         });
         const toolRegistry = new ToolRegistry([...getDefaultTools(), createApprovalTool(approveAll)]);
         const projectNotes = await loadProjectNotes(cwd, fileConfig);
-        const systemPrompt = resumed?.systemPrompt ??
-            buildAgentSystemPrompt({
-                cwd,
-                profile,
-                preset,
-                projectNotes,
-            });
+        const systemPrompt = buildAgentSystemPrompt({
+            cwd,
+            profile,
+            preset,
+            projectNotes,
+        });
         sendEvent({
             type: "run-started",
             runId,

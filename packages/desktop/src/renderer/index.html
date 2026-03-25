@@ -149,9 +149,13 @@
             <div id="inspectorTabs" class="panel-tabs" aria-label="Inspector views"></div>
           </div>
           <div class="panel browser-panel-body">
-            <div class="browser-toolbar">
+            <div id="browserToolbar" class="browser-toolbar">
               <button id="reloadWorkspaceTreeButton" type="button" class="ghost-button">Reload Tree</button>
               <button id="openSelectedFileButton" type="button" class="ghost-button">Open File</button>
+            </div>
+            <div id="projectNotesToolbar" class="browser-toolbar hidden">
+              <button id="saveProjectNotesButton" type="button" class="solid-button inspector-primary-button">Save Notes</button>
+              <button id="openProjectNotesButton" type="button" class="ghost-button">Open Note File</button>
             </div>
             <section id="browserView" class="inspector-view">
               <div id="workspaceTree" class="workspace-tree"></div>
@@ -160,6 +164,29 @@
             <section id="workingSetView" class="inspector-view hidden">
               <div id="workingSetSummary" class="panel-subtle"></div>
               <div id="workingSetList" class="working-set-list"></div>
+            </section>
+            <section id="projectNotesView" class="inspector-view project-notes-view hidden">
+              <div class="project-notes-meta">
+                <div class="project-notes-card">
+                  <div class="project-notes-row">
+                    <span class="project-notes-kicker">Workspace Memory</span>
+                    <span id="projectNotesState" class="project-notes-state" data-tone="saved">Saved</span>
+                  </div>
+                  <strong id="projectNotesPath" class="project-notes-path">Choose a workspace to create notes.</strong>
+                  <p id="projectNotesHint" class="project-notes-hint">
+                    Capture durable context like architecture, constraints, preferred commands, and project-specific reminders.
+                  </p>
+                </div>
+                <label class="project-notes-toggle">
+                  <input id="projectNotesIncludeToggle" type="checkbox" checked />
+                  Include in new runs
+                </label>
+              </div>
+              <textarea
+                id="projectNotesInput"
+                class="project-notes-input"
+                placeholder="Capture stable workspace memory: architecture, conventions, TODOs, preferred commands, testing notes, pitfalls..."
+              ></textarea>
             </section>
           </div>
         </section>

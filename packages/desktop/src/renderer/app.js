@@ -47,6 +47,7 @@ const INSPECTOR_SPLIT_KEY = "gradient-code:inspector-split";
 const INSPECTOR_TABS = [
   { id: "browser", label: "Browser" },
   { id: "working-set", label: "Working Set" },
+  { id: "notes", label: "Notes" },
 ];
 const ACTIVITY_FILTERS = [
   { id: "conversation", label: "Conversation", activeByDefault: true },
@@ -82,6 +83,14 @@ const state = {
   selectedBrowserPath: null,
   browserPreview: null,
   browserPreviewLoading: false,
+  projectNotesPath: "",
+  projectNotesContent: "",
+  projectNotesSavedContent: "",
+  projectNotesExists: false,
+  projectNotesIncludeInPrompt: true,
+  projectNotesSavedIncludeInPrompt: true,
+  projectNotesIsCustomPath: false,
+  projectNotesSaving: false,
   activeInspectorThreadId: null,
   threadTouchedFiles: new Map(),
   activeDiff: null,
@@ -133,6 +142,8 @@ function createDesktopApiFallback() {
       openWorkspacePath: (cwd, relativePath) => ipcRenderer.invoke("desktop:open-workspace-path", cwd, relativePath),
       openHistoryFolder: (cwd) => ipcRenderer.invoke("desktop:open-history-folder", cwd),
       clearWorkspaceHistory: (cwd) => ipcRenderer.invoke("desktop:clear-workspace-history", cwd),
+      saveProjectNotes: (cwd, payload) => ipcRenderer.invoke("desktop:save-project-notes", cwd, payload),
+      openProjectNotes: (cwd) => ipcRenderer.invoke("desktop:open-project-notes", cwd),
       listSessions: (cwd) => ipcRenderer.invoke("desktop:list-sessions", cwd),
       loadSession: (cwd, sessionId) => ipcRenderer.invoke("desktop:load-session", cwd, sessionId),
       deleteSession: (cwd, sessionId) => ipcRenderer.invoke("desktop:delete-session", cwd, sessionId),
@@ -177,14 +188,24 @@ const elements = {
   inspectorTabs: document.getElementById("inspectorTabs"),
   inspectorPane: document.querySelector(".inspector-pane"),
   inspectorResizeHandle: document.getElementById("inspectorResizeHandle"),
+  browserToolbar: document.getElementById("browserToolbar"),
+  projectNotesToolbar: document.getElementById("projectNotesToolbar"),
   reloadWorkspaceTreeButton: document.getElementById("reloadWorkspaceTreeButton"),
   openSelectedFileButton: document.getElementById("openSelectedFileButton"),
   browserView: document.getElementById("browserView"),
   workingSetView: document.getElementById("workingSetView"),
+  projectNotesView: document.getElementById("projectNotesView"),
   workspaceTree: document.getElementById("workspaceTree"),
   filePreview: document.getElementById("filePreview"),
   workingSetSummary: document.getElementById("workingSetSummary"),
   workingSetList: document.getElementById("workingSetList"),
+  projectNotesPath: document.getElementById("projectNotesPath"),
+  projectNotesState: document.getElementById("projectNotesState"),
+  projectNotesHint: document.getElementById("projectNotesHint"),
+  projectNotesIncludeToggle: document.getElementById("projectNotesIncludeToggle"),
+  projectNotesInput: document.getElementById("projectNotesInput"),
+  saveProjectNotesButton: document.getElementById("saveProjectNotesButton"),
+  openProjectNotesButton: document.getElementById("openProjectNotesButton"),
   diffInspectorMeta: document.getElementById("diffInspectorMeta"),
   diffUnifiedButton: document.getElementById("diffUnifiedButton"),
   diffSplitButton: document.getElementById("diffSplitButton"),
@@ -1013,8 +1034,11 @@ function renderInspectorTabs() {
     elements.inspectorTabs.append(button);
   }
 
+  elements.browserToolbar.classList.toggle("hidden", state.inspectorTab !== "browser");
+  elements.projectNotesToolbar.classList.toggle("hidden", state.inspectorTab !== "notes");
   elements.browserView.classList.toggle("hidden", state.inspectorTab !== "browser");
   elements.workingSetView.classList.toggle("hidden", state.inspectorTab !== "working-set");
+  elements.projectNotesView.classList.toggle("hidden", state.inspectorTab !== "notes");
 }
 
 function rebuildThreadTouchedFiles(threadId) {
@@ -1077,6 +1101,18 @@ function renderInspectorContext() {
     ? state.threadTouchedFiles.get(state.activeInspectorThreadId) || rebuildThreadTouchedFiles(state.activeInspectorThreadId)
     : new Map();
 
+  if (state.inspectorTab === "notes") {
+    if (!state.cwd) {
+      elements.inspectorContext.textContent = "Choose a workspace to load project notes.";
+      return;
+    }
+
+    elements.inspectorContext.textContent = state.projectNotesIncludeInPrompt
+      ? `Project notes for ${workspaceLabel}. This memo is injected into new runs for the workspace.`
+      : `Project notes for ${workspaceLabel}. They are saved, but currently excluded from new runs.`;
+    return;
+  }
+
   if (state.inspectorTab === "working-set") {
     if (context) {
       elements.inspectorContext.textContent = `${context.titleElement.textContent} · ${pluralize(touched.size, "touched file")}.`;
@@ -1130,6 +1166,85 @@ function findWorkspaceEntry(relativePath) {
 function setBrowserPreviewState(preview) {
   state.browserPreview = preview;
   renderFilePreview();
+}
+
+function projectNotesDirty() {
+  return (
+    state.projectNotesContent !== state.projectNotesSavedContent ||
+    state.projectNotesIncludeInPrompt !== state.projectNotesSavedIncludeInPrompt
+  );
+}
+
+function applyProjectNotesPayload(payload) {
+  state.projectNotesPath = String(payload?.path || "");
+  state.projectNotesContent = String(payload?.content || "");
+  state.projectNotesSavedContent = String(payload?.content || "");
+  state.projectNotesExists = Boolean(payload?.exists);
+  state.projectNotesIncludeInPrompt = payload?.includeInPrompt !== false;
+  state.projectNotesSavedIncludeInPrompt = payload?.includeInPrompt !== false;
+  state.projectNotesIsCustomPath = Boolean(payload?.isCustomPath);
+  state.projectNotesSaving = false;
+  renderProjectNotes();
+  renderInspectorContext();
+}
+
+function renderProjectNotes() {
+  const hasWorkspace = Boolean(state.cwd);
+  const dirty = projectNotesDirty();
+  const notePath = state.projectNotesPath || "Choose a workspace to create notes.";
+
+  if (elements.projectNotesInput.value !== state.projectNotesContent) {
+    elements.projectNotesInput.value = state.projectNotesContent;
+  }
+
+  elements.projectNotesPath.textContent = notePath;
+  elements.projectNotesPath.title = state.projectNotesPath || "";
+  elements.projectNotesIncludeToggle.checked = state.projectNotesIncludeInPrompt;
+  elements.projectNotesIncludeToggle.disabled = !hasWorkspace || state.projectNotesSaving;
+  elements.projectNotesIncludeToggle.closest(".project-notes-toggle")?.classList.toggle(
+    "is-disabled",
+    !hasWorkspace || state.projectNotesSaving,
+  );
+  elements.projectNotesInput.disabled = !hasWorkspace || state.projectNotesSaving;
+  elements.openProjectNotesButton.disabled = !hasWorkspace;
+  elements.saveProjectNotesButton.disabled = !hasWorkspace || state.projectNotesSaving || !dirty;
+  elements.saveProjectNotesButton.textContent = state.projectNotesSaving ? "Saving..." : "Save Notes";
+
+  let stateLabel = "Saved";
+  let stateTone = "saved";
+  let hint = "Capture durable context like architecture, constraints, preferred commands, and project-specific reminders.";
+
+  if (!hasWorkspace) {
+    stateLabel = "Unavailable";
+    stateTone = "muted";
+    hint = "Choose a workspace to load or create project notes.";
+  } else if (state.projectNotesSaving) {
+    stateLabel = "Saving";
+    stateTone = "active";
+    hint = "Writing the latest notes to disk for this workspace.";
+  } else if (dirty) {
+    stateLabel = "Unsaved";
+    stateTone = "dirty";
+    hint = "Save to update the workspace memory used in future runs.";
+  } else if (!state.projectNotesIncludeInPrompt) {
+    stateLabel = "Paused";
+    stateTone = "muted";
+    hint = "Notes are saved, but they are currently excluded from new runs.";
+  } else if (!state.projectNotesContent.trim()) {
+    stateLabel = "Empty";
+    stateTone = "muted";
+    hint = "Start this memo with architecture, preferred commands, constraints, or recurring pitfalls.";
+  } else if (state.projectNotesIsCustomPath) {
+    stateLabel = "Custom path";
+    stateTone = "saved";
+    hint = "These notes are loaded from a custom project notes path and injected into new runs.";
+  } else {
+    hint = "These notes are injected into new runs so the workspace keeps its memory over time.";
+  }
+
+  elements.projectNotesState.textContent = stateLabel;
+  elements.projectNotesState.dataset.tone = stateTone;
+  elements.projectNotesHint.textContent = hint;
 }
 
 function renderFilePreview() {
@@ -1455,6 +1570,49 @@ async function reloadWorkspaceBrowser() {
   }
 
   await ensureWorkspaceTreeLoaded();
+}
+
+async function saveProjectNotesFromUi() {
+  if (!state.cwd || !desktopApi || state.projectNotesSaving) {
+    return;
+  }
+
+  state.projectNotesSaving = true;
+  renderProjectNotes();
+
+  try {
+    const payload = await desktopApi.saveProjectNotes(state.cwd, {
+      content: state.projectNotesContent,
+      includeInPrompt: state.projectNotesIncludeInPrompt,
+    });
+    applyProjectNotesPayload(payload);
+    setStatus(
+      state.projectNotesIncludeInPrompt
+        ? "Project notes saved and will be used in new runs."
+        : "Project notes saved, but they are currently excluded from new runs.",
+    );
+  } catch (error) {
+    state.projectNotesSaving = false;
+    renderProjectNotes();
+    setStatus(toErrorMessage(error));
+  }
+}
+
+async function openProjectNotesFromUi() {
+  if (!state.cwd || !desktopApi) {
+    return;
+  }
+
+  try {
+    const result = await desktopApi.openProjectNotes(state.cwd);
+    if (!result?.ok) {
+      setStatus(result?.error || "Could not open the project notes file.");
+      return;
+    }
+    setStatus(`Opened project notes: ${result.path}`);
+  } catch (error) {
+    setStatus(toErrorMessage(error));
+  }
 }
 
 async function openWorkspacePath(relativePath) {
@@ -3234,7 +3392,7 @@ function populateModelOptions(options, selectedModel) {
   state.model = selectedValue;
 }
 
-function applyConfigToUi(cwd, config, sessions, modelOptions) {
+function applyConfigToUi(cwd, config, sessions, modelOptions, projectNotes) {
   state.cwd = cwd;
   state.modelOptions = Array.isArray(modelOptions) ? modelOptions : state.modelOptions;
   state.sessions = sessions || [];
@@ -3247,6 +3405,7 @@ function applyConfigToUi(cwd, config, sessions, modelOptions) {
   populateModelOptions(state.modelOptions, config.model || state.model || "kimi-k2.5");
   setPreset(config.preset || state.preset || "default");
   syncTopbarState();
+  applyProjectNotesPayload(projectNotes);
 
   renderSessions();
 }
@@ -3535,7 +3694,7 @@ async function bootstrap() {
       throw new Error("Desktop IPC bridge is unavailable.");
     }
     const payload = await desktopApi.getBootstrap();
-    applyConfigToUi(payload.cwd, payload.config, payload.sessions, payload.modelOptions);
+    applyConfigToUi(payload.cwd, payload.config, payload.sessions, payload.modelOptions, payload.projectNotes);
     if (state.workspaceThreadId) {
       updateThreadContext(state.workspaceThreadId, {
         subtitle: formatWorkspaceLabel(payload.cwd),
@@ -3558,7 +3717,7 @@ async function reloadWorkspaceState() {
       throw new Error("Desktop IPC bridge is unavailable.");
     }
     const payload = await desktopApi.getBootstrap(cwd);
-    applyConfigToUi(payload.cwd, payload.config, payload.sessions, payload.modelOptions);
+    applyConfigToUi(payload.cwd, payload.config, payload.sessions, payload.modelOptions, payload.projectNotes);
     state.currentSessionId = null;
     state.branchSessionId = null;
     resetTranscriptView();
@@ -3594,6 +3753,7 @@ async function saveConfig() {
     storeResponses: elements.storeHistoryToggle.checked,
     maxTurns: Number.parseInt(elements.maxTurnsInput.value || "12", 10),
     preset: state.preset,
+    includeProjectNotes: state.projectNotesIncludeInPrompt,
   };
   const cwd = elements.workspaceInput.value.trim();
   if (!desktopApi) {
@@ -4026,6 +4186,32 @@ elements.openSelectedFileButton.addEventListener("click", async () => {
   await openWorkspacePath(state.selectedBrowserPath);
 });
 
+elements.saveProjectNotesButton.addEventListener("click", async () => {
+  await saveProjectNotesFromUi();
+});
+
+elements.openProjectNotesButton.addEventListener("click", async () => {
+  await openProjectNotesFromUi();
+});
+
+elements.projectNotesIncludeToggle.addEventListener("change", () => {
+  state.projectNotesIncludeInPrompt = elements.projectNotesIncludeToggle.checked;
+  renderProjectNotes();
+  renderInspectorContext();
+});
+
+elements.projectNotesInput.addEventListener("input", () => {
+  state.projectNotesContent = elements.projectNotesInput.value;
+  renderProjectNotes();
+});
+
+elements.projectNotesInput.addEventListener("keydown", async (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    await saveProjectNotesFromUi();
+  }
+});
+
 elements.diffUnifiedButton.addEventListener("click", () => {
   state.diffViewMode = "unified";
   renderDiffInspector();
@@ -4135,6 +4321,7 @@ renderActivityFilters();
 renderInspectorTabs();
 renderWorkspaceTree();
 renderFilePreview();
+renderProjectNotes();
 renderWorkingSet();
 renderDiffInspector();
 setPreset(state.preset);
