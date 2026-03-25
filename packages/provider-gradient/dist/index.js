@@ -549,6 +549,62 @@ function mergeTextFragments(existing, incoming) {
     }
     return `${current}\n${next}`;
 }
+function reconcileStreamingSnapshot(existing, incoming) {
+    const current = existing.trimEnd();
+    const next = incoming.trim();
+    if (!next) {
+        return {
+            text: current,
+            delta: "",
+        };
+    }
+    if (!current) {
+        return {
+            text: next,
+            delta: next,
+        };
+    }
+    if (next.startsWith(current)) {
+        return {
+            text: next,
+            delta: next.slice(current.length),
+        };
+    }
+    if (current.startsWith(next) || current.includes(next)) {
+        return {
+            text: current,
+            delta: "",
+        };
+    }
+    if (next.includes(current)) {
+        return {
+            text: next,
+            delta: "",
+        };
+    }
+    const normalizedCurrent = current.replace(/\s+/g, " ").trim();
+    const normalizedNext = next.replace(/\s+/g, " ").trim();
+    if (normalizedCurrent && normalizedCurrent === normalizedNext) {
+        return {
+            text: next.length >= current.length ? next : current,
+            delta: "",
+        };
+    }
+    const maxOverlap = Math.min(current.length, next.length);
+    for (let size = maxOverlap; size >= 12; size -= 1) {
+        if (current.slice(-size) === next.slice(0, size)) {
+            return {
+                text: `${current}${next.slice(size)}`,
+                delta: next.slice(size),
+            };
+        }
+    }
+    // Completed snapshots should not replay the entire response if overlap detection is ambiguous.
+    return {
+        text: next.length >= current.length ? next : current,
+        delta: "",
+    };
+}
 function extractResponseTextPart(part) {
     if (!part || typeof part !== "object") {
         return "";
@@ -782,7 +838,7 @@ function parseResponsesStreamingEvent(payload, accumulator, handlers) {
             return;
         case "response.output_text.done":
             if (typeof payload.text === "string") {
-                accumulator.content = mergeTextFragments(accumulator.content, payload.text);
+                accumulator.content = reconcileStreamingSnapshot(accumulator.content, payload.text).text;
             }
             return;
         case "response.function_call_arguments.delta": {
@@ -808,11 +864,10 @@ function parseResponsesStreamingEvent(payload, accumulator, handlers) {
             accumulator.completedResponse = payload.response;
             if (payload.response) {
                 const parsed = parseResponsesTurn(payload.response);
-                const mergedText = mergeTextFragments(accumulator.content, parsed.text);
-                const delta = mergedText.slice(accumulator.content.length);
-                accumulator.content = mergedText;
-                if (delta) {
-                    handlers.onTextDelta?.(delta);
+                const snapshot = reconcileStreamingSnapshot(accumulator.content, parsed.text);
+                accumulator.content = snapshot.text;
+                if (snapshot.delta) {
+                    handlers.onTextDelta?.(snapshot.delta);
                 }
                 for (const output of parsed.outputs) {
                     if (output.type !== "tool_call") {

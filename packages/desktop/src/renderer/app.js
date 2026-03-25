@@ -1006,6 +1006,27 @@ function appendAssistantEvent(threadId, text) {
   assistantState.turnText = "";
 }
 
+function sealAssistantSegment(threadId) {
+  const assistantState = state.assistantStates.get(threadId);
+  if (!assistantState) {
+    return;
+  }
+
+  const hasVisibleText =
+    String(assistantState.visibleText || "").trim() ||
+    String(assistantState.turnText || "").trim() ||
+    String(assistantState.renderedText || "").trim();
+
+  if (!hasVisibleText && assistantState.bubble) {
+    assistantState.bubble.wrapper.remove();
+  }
+
+  assistantState.bubble = null;
+  assistantState.renderedText = "";
+  assistantState.visibleText = "";
+  assistantState.turnText = "";
+}
+
 function buildDisclosure(label, className, text, open = false) {
   const disclosure = document.createElement("details");
   disclosure.className = "timeline-entry-disclosure";
@@ -1722,6 +1743,7 @@ function renderSessionTranscript(events) {
     }
 
     if (event.type === "tool_call") {
+      sealAssistantSegment(currentThreadId);
       upsertTimelineEntry(currentThreadId, {
         id: event.callId,
         category: COMMAND_TOOL_NAMES.has(event.toolName) ? "commands" : "tools",
@@ -1738,6 +1760,7 @@ function renderSessionTranscript(events) {
     }
 
     if (event.type === "tool_result") {
+      sealAssistantSegment(currentThreadId);
       const diff = typeof event.result?.metadata?.diff === "string" ? event.result.metadata.diff : "";
       const entry = {
         id: event.callId,
@@ -2156,6 +2179,7 @@ if (desktopApi) {
     if (payload.type === "tool-call") {
       const threadId = state.runThreadMap.get(payload.runId) ?? state.pendingThreadId;
       if (threadId) {
+        sealAssistantSegment(threadId);
         upsertTimelineEntry(threadId, createPendingToolEntry(payload));
       }
       updateProgress({
@@ -2168,6 +2192,7 @@ if (desktopApi) {
     if (payload.type === "tool-result") {
       const threadId = state.runThreadMap.get(payload.runId) ?? state.pendingThreadId;
       if (threadId) {
+        sealAssistantSegment(threadId);
         upsertTimelineEntry(threadId, createFinishedToolEntry(payload));
       }
       updateProgress({
@@ -2183,6 +2208,7 @@ if (desktopApi) {
         (state.currentRunId ? state.runThreadMap.get(state.currentRunId) : null) ??
         state.pendingThreadId ??
         ensureWorkspaceThread();
+      sealAssistantSegment(threadId);
       const approval = {
         ...payload,
         threadId,
