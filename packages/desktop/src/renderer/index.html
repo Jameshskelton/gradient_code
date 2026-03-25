@@ -233,6 +233,29 @@
         console.error("[startup-error]", event.message);
       });
     </script>
+    <div id="commandPalette" class="command-palette hidden" role="dialog" aria-modal="true" aria-labelledby="commandPaletteTitle">
+      <div id="commandPaletteBackdrop" class="command-palette-backdrop"></div>
+      <div class="command-palette-card">
+        <div class="command-palette-header">
+          <div>
+            <p id="commandPaletteTitle" class="command-palette-title">Command Palette</p>
+            <p class="command-palette-subtitle">Jump to sessions, files, models, approvals, and workspace actions.</p>
+          </div>
+          <div class="command-palette-shortcut">Cmd/Ctrl + K</div>
+        </div>
+        <input
+          id="commandPaletteInput"
+          class="command-palette-input"
+          type="text"
+          autocomplete="off"
+          spellcheck="false"
+          placeholder="Search commands, files, sessions, models..."
+          aria-label="Search commands"
+        />
+        <div id="commandPaletteMeta" class="command-palette-meta">Type to search the workspace and app actions.</div>
+        <div id="commandPaletteResults" class="command-palette-results" role="listbox" aria-label="Command palette results"></div>
+      </div>
+    </div>
     <script src="./app.js"></script>
   </body>
   </html>

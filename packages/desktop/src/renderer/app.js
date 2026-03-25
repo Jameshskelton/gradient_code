@@ -5,6 +5,13 @@ const COMMAND_TOOL_NAMES = new Set([
   "send_process_input",
   "close_command_session",
 ]);
+const NETWORK_APPROVAL_TOOL_NAMES = new Set(["web_search", "fetch_url"]);
+const HIGH_RISK_COMMAND_PATTERN =
+  /\b(rm|sudo|chmod|chown|dd|mkfs|launchctl|killall|pkill)\b|git\s+(reset|clean)\b|npm\s+publish\b|pnpm\s+publish\b|yarn\s+publish\b|cargo\s+publish\b|curl\b.*\|\s*(sh|bash|zsh)\b|wget\b.*\|\s*(sh|bash|zsh)\b|[>|]{2}|[|]\s*(sh|bash|zsh)\b/i;
+const MEDIUM_RISK_COMMAND_PATTERN =
+  /\b(npm|pnpm|yarn|bun|cargo|go|pytest|vitest|jest|playwright|cypress|make|docker|kubectl|terraform|gradle|mvn|swift|xcodebuild)\b/i;
+const SENSITIVE_WRITE_PATH_PATTERN =
+  /(^|\/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|Dockerfile|docker-compose\.(yml|yaml)|\.env($|\.)|\.github\/|tsconfig(\.[^.]+)?\.json$|vite\.config|webpack\.config|rollup\.config|eslint\.config|prettier\.config|turbo\.json$|vercel\.json$|pnpm-workspace\.yaml$)/i;
 
 const PRESET_OPTIONS = [
   {
@@ -57,6 +64,20 @@ const ACTIVITY_FILTERS = [
 ];
 const DEFAULT_INSPECTOR_SPLIT = 0.52;
 const INSPECTOR_MIN_PANEL_HEIGHT = 190;
+const TIMELINE_BATCH_MIN_SIZE = 3;
+const TIMELINE_BATCH_FAMILIES = new Map([
+  ["read_file", "file-read"],
+  ["read_many_files", "file-read"],
+  ["inspect_path", "file-read"],
+  ["find_symbol", "symbol-inspection"],
+  ["find_references", "symbol-inspection"],
+  ["list_exports", "symbol-inspection"],
+  ["list_imports", "symbol-inspection"],
+  ["search_text", "text-search"],
+  ["list_files", "workspace-scan"],
+  ["list_tree", "workspace-scan"],
+]);
+const COMMAND_PALETTE_FILE_LIMIT = 5000;
 
 const state = {
   cwd: "",
@@ -102,6 +123,15 @@ const state = {
   assistantStates: new Map(),
   runThreadMap: new Map(),
   activityEntryMap: new Map(),
+  timelineBatchOpen: new Set(),
+  commandPaletteOpen: false,
+  commandPaletteQuery: "",
+  commandPaletteSelectedIndex: 0,
+  commandPaletteWorkspacePath: "",
+  commandPaletteFiles: [],
+  commandPaletteLoading: false,
+  commandPaletteToken: 0,
+  commandPaletteResults: [],
   workspaceThreadId: null,
   activeFilters: new Set(
     ACTIVITY_FILTERS.filter((filter) => filter.activeByDefault).map((filter) => filter.id),
@@ -150,7 +180,7 @@ function createDesktopApiFallback() {
       saveConfig: (cwd, config) => ipcRenderer.invoke("desktop:save-config", cwd, config),
       startRun: (payload) => ipcRenderer.invoke("desktop:start-run", payload),
       cancelRun: () => ipcRenderer.invoke("desktop:cancel-run"),
-      respondApproval: (requestId, approved) => ipcRenderer.invoke("desktop:respond-approval", requestId, approved),
+      respondApproval: (requestId, response) => ipcRenderer.invoke("desktop:respond-approval", requestId, response),
       onEvent: (callback) => {
         const listener = (_event, payload) => callback(payload);
         ipcRenderer.on("desktop:event", listener);
@@ -227,6 +257,11 @@ const elements = {
   activityFilters: document.getElementById("activityFilters"),
   inspectorToggleButton: document.getElementById("inspectorToggleButton"),
   transcript: document.getElementById("transcript"),
+  commandPalette: document.getElementById("commandPalette"),
+  commandPaletteBackdrop: document.getElementById("commandPaletteBackdrop"),
+  commandPaletteInput: document.getElementById("commandPaletteInput"),
+  commandPaletteMeta: document.getElementById("commandPaletteMeta"),
+  commandPaletteResults: document.getElementById("commandPaletteResults"),
   composerForm: document.getElementById("composerForm"),
   promptInput: document.getElementById("promptInput"),
   sendButton: document.getElementById("sendButton"),
@@ -704,6 +739,670 @@ function renderActivityFilters() {
   }
 }
 
+function normalizeCommandPaletteText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function highlightCommandPaletteTarget(element) {
+  if (!element) {
+    return;
+  }
+
+  element.classList.add("is-command-target");
+  window.setTimeout(() => {
+    element.classList.remove("is-command-target");
+  }, 1400);
+}
+
+function focusThreadFromPalette(threadId) {
+  const context = state.threadContexts.get(threadId);
+  if (!context) {
+    return;
+  }
+
+  setActiveInspectorThread(threadId);
+  context.section.scrollIntoView({
+    block: "center",
+    behavior: "smooth",
+  });
+  highlightCommandPaletteTarget(context.section);
+}
+
+function focusTimelineEntryFromPalette(threadId, entryId) {
+  const record = getTimelineEntryRecord(threadId, entryId);
+  if (!record) {
+    focusThreadFromPalette(threadId);
+    return;
+  }
+
+  const batch = record.element.closest(".timeline-batch");
+  if (batch) {
+    batch.open = true;
+    if (batch.dataset.batchId) {
+      state.timelineBatchOpen.add(batch.dataset.batchId);
+    }
+  }
+
+  setActiveInspectorThread(threadId);
+  const target = batch || record.element;
+  target.scrollIntoView({
+    block: "center",
+    behavior: "smooth",
+  });
+  highlightCommandPaletteTarget(record.element);
+}
+
+async function openSessionFromUi(session, options = {}) {
+  if (!desktopApi) {
+    setStatus("Desktop IPC bridge is unavailable.");
+    return null;
+  }
+
+  const loaded = await desktopApi.loadSession(state.cwd, session.id);
+  if (!loaded) {
+    setStatus("Could not load that session.");
+    return null;
+  }
+
+  state.currentSessionId = loaded.id;
+  state.branchSessionId = options.branch ? loaded.id : null;
+  renderSessions();
+  renderSessionTranscript(loaded.events);
+  resetProgress();
+
+  if (options.statusText) {
+    setStatus(options.statusText);
+  } else if (!options.suppressStatus) {
+    setStatus("Conversation restored.");
+  }
+
+  return loaded;
+}
+
+function buildThreadCommands() {
+  const commands = [];
+  for (const [threadId, context] of state.threadContexts.entries()) {
+    commands.push({
+      id: `thread:${threadId}`,
+      group: "Timeline",
+      title: context.titleElement.textContent || "Conversation thread",
+      subtitle: context.metaElement.textContent || "Jump to timeline thread",
+      keywords: `thread timeline ${context.statusElement.textContent || ""}`,
+      priority: threadId === state.activeInspectorThreadId ? 46 : 72,
+      badge: context.statusElement.textContent || "",
+      execute: () => {
+        focusThreadFromPalette(threadId);
+      },
+    });
+  }
+  return commands;
+}
+
+function buildApprovalCommands() {
+  if (!Array.isArray(state.approvals) || state.approvals.length === 0) {
+    return [];
+  }
+
+  const commands = [
+    {
+      id: "approval:latest",
+      group: "Approval",
+      title: `Jump to latest approval: ${state.approvals[0].toolName}`,
+      subtitle: "Review the most recent pending approval request.",
+      keywords: `approval latest ${state.approvals[0].toolName}`,
+      priority: 12,
+      badge: "Pending",
+      execute: () => {
+        focusTimelineEntryFromPalette(state.approvals[0].threadId, state.approvals[0].requestId);
+      },
+    },
+  ];
+
+  for (const approval of state.approvals.slice(0, 8)) {
+    commands.push({
+      id: `approval:${approval.requestId}`,
+      group: "Approval",
+      title: approval.toolName,
+      subtitle: "Jump to this pending approval.",
+      keywords: `approval ${approval.toolName} pending`,
+      priority: 24,
+      badge: "Pending",
+      execute: () => {
+        focusTimelineEntryFromPalette(approval.threadId, approval.requestId);
+      },
+    });
+  }
+
+  return commands;
+}
+
+function buildSessionCommands() {
+  return state.sessions.flatMap((session, index) => {
+    const title = session.lastUserPrompt || "Untitled session";
+    const baseKeywords = `${title} ${session.model} session restore branch ${session.updatedAt}`;
+    return [
+      {
+        id: `session:open:${session.id}`,
+        group: "Session",
+        title,
+        subtitle: `Open session · ${session.model} · ${formatTime(session.updatedAt)}`,
+        keywords: `${baseKeywords} open`,
+        priority: state.currentSessionId === session.id ? 18 + index : 58 + index,
+        badge: state.currentSessionId === session.id ? "Current" : "Session",
+        execute: async () => {
+          await openSessionFromUi(session);
+        },
+      },
+      {
+        id: `session:branch:${session.id}`,
+        group: "Session",
+        title: `Branch: ${title}`,
+        subtitle: `Start the next run from this session as a new branch.`,
+        keywords: `${baseKeywords} branch fork`,
+        priority: 92 + index,
+        badge: state.branchSessionId === session.id ? "Branching" : "Branch",
+        disabled: state.running,
+        execute: async () => {
+          await branchSessionFromUi(session);
+        },
+      },
+    ];
+  });
+}
+
+function buildModelCommands() {
+  return state.modelOptions.map((option, index) => ({
+    id: `model:${option.id}`,
+    group: "Model",
+    title: option.label,
+    subtitle: `${option.family} model${option.id === elements.modelInput.value ? " · current selection" : ""}`,
+    keywords: `${option.label} ${option.id} ${option.family} model`,
+    priority: option.id === elements.modelInput.value ? 16 : 100 + index,
+    badge: option.id === elements.modelInput.value ? "Current" : option.family,
+    execute: () => {
+      elements.modelInput.value = option.id;
+      elements.collapsedModelInput.value = option.id;
+      state.model = option.id;
+      syncTopbarState();
+      setStatus(`Selected model ${option.label}.`);
+    },
+  }));
+}
+
+function collectSuggestedPaletteFiles() {
+  const suggestions = [];
+  if (state.selectedBrowserPath) {
+    suggestions.push(state.selectedBrowserPath);
+  }
+  if (state.activeDiffFilePath) {
+    suggestions.push(state.activeDiffFilePath);
+  }
+
+  const threadId = state.activeInspectorThreadId || [...state.threadContexts.keys()].pop();
+  if (threadId) {
+    const touched = state.threadTouchedFiles.get(threadId) || rebuildThreadTouchedFiles(threadId);
+    suggestions.push(
+      ...[...touched.values()]
+        .sort((left, right) => right.order - left.order || left.path.localeCompare(right.path))
+        .map((item) => item.path),
+    );
+  }
+
+  return uniqueWorkspacePaths(suggestions);
+}
+
+function scoreCommandPaletteFile(path, query) {
+  const normalizedPath = normalizeCommandPaletteText(path);
+  const normalizedQuery = normalizeCommandPaletteText(query);
+  if (!normalizedQuery) {
+    return normalizedPath.length;
+  }
+
+  const tokens = normalizedQuery.split(" ").filter(Boolean);
+  if (tokens.some((token) => !normalizedPath.includes(token))) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  if (normalizedPath === normalizedQuery) {
+    return 0;
+  }
+  if (normalizedPath.startsWith(normalizedQuery)) {
+    return 10;
+  }
+
+  const lastSegment = normalizeCommandPaletteText(lastPathSegment(path));
+  if (lastSegment === normalizedQuery) {
+    return 6;
+  }
+  if (lastSegment.startsWith(normalizedQuery)) {
+    return 12;
+  }
+  if (lastSegment.includes(normalizedQuery)) {
+    return 20;
+  }
+
+  return normalizedPath.indexOf(normalizedQuery) + 40;
+}
+
+function buildFileCommands(query) {
+  const normalizedQuery = normalizeCommandPaletteText(query);
+  const source = normalizedQuery ? state.commandPaletteFiles : collectSuggestedPaletteFiles();
+  const ranked = [...source]
+    .map((path) => ({
+      path,
+      score: scoreCommandPaletteFile(path, normalizedQuery),
+    }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((left, right) => left.score - right.score || left.path.localeCompare(right.path))
+    .slice(0, normalizedQuery ? 16 : 8);
+
+  return ranked.map(({ path }, index) => ({
+    id: `file:${path}`,
+    group: "File",
+    title: lastPathSegment(path),
+    subtitle: path,
+    keywords: `${path} file preview browser`,
+    priority: 34 + index,
+    badge: "File",
+    execute: async () => {
+      setInspectorCollapsed(false);
+      setInspectorTab("browser");
+      await previewWorkspaceFile(path);
+      setStatus(`Opened ${path}.`);
+    },
+  }));
+}
+
+function buildActionCommands() {
+  return [
+    {
+      id: "action:toggle-inspector",
+      group: "Action",
+      title: state.inspectorCollapsed ? "Show Inspector" : "Hide Inspector",
+      subtitle: "Toggle the workspace and diff sidebar.",
+      keywords: "inspector sidebar panel toggle",
+      priority: 0,
+      badge: "Action",
+      execute: () => {
+        setInspectorCollapsed(!state.inspectorCollapsed);
+      },
+    },
+    {
+      id: "action:browser",
+      group: "Action",
+      title: "Open Workspace Browser",
+      subtitle: "Show the inspector and focus the workspace tree.",
+      keywords: "workspace browser files tree inspector",
+      priority: 4,
+      badge: "Workspace",
+      execute: () => {
+        setInspectorCollapsed(false);
+        setInspectorTab("browser");
+      },
+    },
+    {
+      id: "action:working-set",
+      group: "Action",
+      title: "Open Working Set",
+      subtitle: "Show files touched in the active thread.",
+      keywords: "working set touched files inspector",
+      priority: 8,
+      badge: "Workspace",
+      execute: () => {
+        setInspectorCollapsed(false);
+        setInspectorTab("working-set");
+      },
+    },
+    {
+      id: "action:notes",
+      group: "Action",
+      title: "Open Project Notes",
+      subtitle: "Show the workspace memory notes surface.",
+      keywords: "project notes memory inspector",
+      priority: 10,
+      badge: "Workspace",
+      execute: () => {
+        setInspectorCollapsed(false);
+        setInspectorTab("notes");
+      },
+    },
+    {
+      id: "action:focus-prompt",
+      group: "Action",
+      title: "Focus Prompt Composer",
+      subtitle: "Jump to the prompt box and keep typing.",
+      keywords: "prompt composer input chat ask",
+      priority: 14,
+      badge: "Action",
+      execute: () => {
+        elements.promptInput.focus();
+      },
+    },
+    {
+      id: "action:open-history",
+      group: "Action",
+      title: "Open History Folder",
+      subtitle: "Open this workspace's saved session folder.",
+      keywords: "history folder sessions open",
+      priority: 20,
+      badge: "History",
+      execute: async () => {
+        await openHistoryFolderFromUi();
+      },
+    },
+    {
+      id: "action:refresh-workspace",
+      group: "Action",
+      title: "Refresh Workspace State",
+      subtitle: "Reload sessions, config, and the workspace browser.",
+      keywords: "refresh workspace sessions browser reload",
+      priority: 28,
+      badge: "Action",
+      execute: async () => {
+        await reloadWorkspaceState();
+      },
+    },
+    {
+      id: "action:choose-workspace",
+      group: "Action",
+      title: "Choose Workspace",
+      subtitle: "Pick a different repository or folder.",
+      keywords: "workspace folder choose switch",
+      priority: 32,
+      badge: "Action",
+      execute: async () => {
+        await chooseWorkspace();
+      },
+    },
+  ];
+}
+
+function scoreCommandPaletteItem(item, query) {
+  const normalizedQuery = normalizeCommandPaletteText(query);
+  if (!normalizedQuery) {
+    return item.priority ?? 1000;
+  }
+
+  const title = normalizeCommandPaletteText(item.title);
+  const haystack = normalizeCommandPaletteText(
+    `${item.title} ${item.subtitle || ""} ${item.keywords || ""} ${item.group || ""} ${item.badge || ""}`,
+  );
+  const tokens = normalizedQuery.split(" ").filter(Boolean);
+  if (tokens.some((token) => !haystack.includes(token))) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  let score = item.priority ?? 1000;
+  if (title === normalizedQuery) {
+    score -= 500;
+  } else if (title.startsWith(normalizedQuery)) {
+    score -= 300;
+  } else if (title.includes(normalizedQuery)) {
+    score -= 180;
+  } else if (haystack.includes(normalizedQuery)) {
+    score -= 80;
+  }
+
+  const titleIndex = title.indexOf(normalizedQuery);
+  if (titleIndex >= 0) {
+    score += titleIndex;
+  } else {
+    score += haystack.indexOf(normalizedQuery) + 40;
+  }
+
+  return score;
+}
+
+function getCommandPaletteItems() {
+  const query = state.commandPaletteQuery;
+  const commands = [
+    ...buildActionCommands(),
+    ...buildApprovalCommands(),
+    ...buildSessionCommands(),
+    ...buildThreadCommands(),
+    ...buildModelCommands(),
+    ...buildFileCommands(query),
+  ]
+    .map((item) => ({
+      ...item,
+      score: scoreCommandPaletteItem(item, query),
+    }))
+    .filter((item) => Number.isFinite(item.score))
+    .sort((left, right) => left.score - right.score || left.title.localeCompare(right.title));
+
+  return commands.slice(0, 16);
+}
+
+function renderCommandPalette() {
+  elements.commandPalette.classList.toggle("hidden", !state.commandPaletteOpen);
+  document.body.classList.toggle("command-palette-open", state.commandPaletteOpen);
+  if (!state.commandPaletteOpen) {
+    elements.commandPaletteInput.removeAttribute("aria-activedescendant");
+    return;
+  }
+
+  const items = getCommandPaletteItems();
+  state.commandPaletteResults = items;
+  state.commandPaletteSelectedIndex = Math.max(0, Math.min(state.commandPaletteSelectedIndex, Math.max(0, items.length - 1)));
+  elements.commandPaletteResults.textContent = "";
+
+  if (items.length === 0) {
+    const empty = document.createElement("div");
+    empty.className = "command-palette-empty";
+    empty.textContent = state.commandPaletteLoading
+      ? "Indexing workspace files..."
+      : "No matching commands. Try a file path, session title, model name, or action.";
+    elements.commandPaletteResults.append(empty);
+  } else {
+    items.forEach((item, index) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "command-palette-item";
+      button.id = `commandPaletteItem-${index}`;
+      button.setAttribute("role", "option");
+      button.setAttribute("aria-selected", String(index === state.commandPaletteSelectedIndex));
+      button.disabled = Boolean(item.disabled);
+      if (index === state.commandPaletteSelectedIndex) {
+        button.classList.add("is-active");
+      }
+      if (item.disabled) {
+        button.classList.add("is-disabled");
+      }
+
+      const header = document.createElement("div");
+      header.className = "command-palette-item-header";
+
+      const group = document.createElement("span");
+      group.className = "command-palette-item-group";
+      group.textContent = item.group;
+
+      const badge = document.createElement("span");
+      badge.className = "command-palette-item-badge";
+      badge.textContent = item.badge || item.group;
+
+      header.append(group, badge);
+
+      const title = document.createElement("strong");
+      title.textContent = item.title;
+
+      const subtitle = document.createElement("span");
+      subtitle.className = "command-palette-item-subtitle";
+      subtitle.textContent = item.subtitle || "";
+
+      button.append(header, title, subtitle);
+      button.addEventListener("mousemove", () => {
+        state.commandPaletteSelectedIndex = index;
+        renderCommandPalette();
+      });
+      button.addEventListener("click", async () => {
+        await executeCommandPaletteItem(index);
+      });
+      elements.commandPaletteResults.append(button);
+    });
+  }
+
+  const activeItemId = items[state.commandPaletteSelectedIndex]
+    ? `commandPaletteItem-${state.commandPaletteSelectedIndex}`
+    : "";
+  if (activeItemId) {
+    elements.commandPaletteInput.setAttribute("aria-activedescendant", activeItemId);
+  } else {
+    elements.commandPaletteInput.removeAttribute("aria-activedescendant");
+  }
+
+  if (state.commandPaletteLoading) {
+    elements.commandPaletteMeta.textContent = `Searching commands. Indexing workspace files for quick file jumps${state.commandPaletteFiles.length > 0 ? ` · ${pluralize(state.commandPaletteFiles.length, "file")} cached` : ""}.`;
+  } else {
+    const fileStatus = state.commandPaletteWorkspacePath === state.cwd && state.commandPaletteFiles.length > 0
+      ? ` · ${pluralize(state.commandPaletteFiles.length, "file")} indexed`
+      : "";
+    elements.commandPaletteMeta.textContent = `${pluralize(items.length, "result")} shown${fileStatus}. Use arrow keys and Enter.`;
+  }
+
+  elements.commandPaletteResults.querySelector(".command-palette-item.is-active")?.scrollIntoView({
+    block: "nearest",
+  });
+}
+
+async function executeCommandPaletteItem(index = state.commandPaletteSelectedIndex) {
+  const item = state.commandPaletteResults[index];
+  if (!item || item.disabled) {
+    return;
+  }
+
+  closeCommandPalette();
+  await item.execute();
+}
+
+function closeCommandPalette() {
+  state.commandPaletteOpen = false;
+  renderCommandPalette();
+}
+
+function moveCommandPaletteSelection(delta) {
+  const itemCount = state.commandPaletteResults.length;
+  if (itemCount === 0) {
+    state.commandPaletteSelectedIndex = 0;
+    renderCommandPalette();
+    return;
+  }
+
+  const nextIndex = Math.max(0, Math.min(itemCount - 1, state.commandPaletteSelectedIndex + delta));
+  if (nextIndex === state.commandPaletteSelectedIndex) {
+    return;
+  }
+
+  state.commandPaletteSelectedIndex = nextIndex;
+  renderCommandPalette();
+}
+
+function invalidateCommandPaletteFileIndex() {
+  state.commandPaletteWorkspacePath = "";
+  state.commandPaletteFiles = [];
+  state.commandPaletteLoading = false;
+  state.commandPaletteToken += 1;
+}
+
+function openCommandPalette(initialQuery = "") {
+  state.commandPaletteOpen = true;
+  state.commandPaletteSelectedIndex = 0;
+  state.commandPaletteQuery = String(initialQuery || "");
+  elements.commandPaletteInput.value = state.commandPaletteQuery;
+  renderCommandPalette();
+  void ensureCommandPaletteFileIndex();
+  window.requestAnimationFrame(() => {
+    elements.commandPaletteInput.focus();
+    elements.commandPaletteInput.select();
+  });
+}
+
+function toggleCommandPalette() {
+  if (state.commandPaletteOpen) {
+    closeCommandPalette();
+    return;
+  }
+  openCommandPalette();
+}
+
+async function ensureCommandPaletteFileIndex(force = false) {
+  if (!desktopApi || !state.cwd) {
+    return [];
+  }
+
+  if (!force && state.commandPaletteWorkspacePath === state.cwd && state.commandPaletteFiles.length > 0) {
+    return state.commandPaletteFiles;
+  }
+
+  const token = Date.now();
+  state.commandPaletteToken = token;
+  state.commandPaletteLoading = true;
+  if (force) {
+    state.commandPaletteFiles = [];
+  }
+  renderCommandPalette();
+
+  try {
+    const files = [];
+    const queue = [""];
+    const visited = new Set();
+
+    while (queue.length > 0 && files.length < COMMAND_PALETTE_FILE_LIMIT) {
+      const relativePath = queue.shift();
+      if (visited.has(relativePath)) {
+        continue;
+      }
+      visited.add(relativePath);
+
+      let entries = state.workspaceTreeEntries.get(relativePath);
+      if (!entries) {
+        const payload = await desktopApi.listWorkspaceTree(state.cwd, relativePath);
+        entries = Array.isArray(payload?.entries)
+          ? payload.entries.map((entry) => ({
+              ...entry,
+              path: normalizeWorkspaceRelativePath(entry.path),
+            }))
+          : [];
+        state.workspaceTreeEntries.set(relativePath, entries);
+      }
+
+      for (const entry of entries) {
+        const normalized = normalizeWorkspaceRelativePath(entry.path);
+        if (!normalized) {
+          continue;
+        }
+        if (entry.type === "directory") {
+          queue.push(normalized);
+          continue;
+        }
+        files.push(normalized);
+        if (files.length >= COMMAND_PALETTE_FILE_LIMIT) {
+          break;
+        }
+      }
+    }
+
+    if (state.commandPaletteToken !== token) {
+      return state.commandPaletteFiles;
+    }
+
+    state.commandPaletteFiles = files.sort((left, right) => left.localeCompare(right));
+    state.commandPaletteWorkspacePath = state.cwd;
+    state.commandPaletteLoading = false;
+    renderCommandPalette();
+    return state.commandPaletteFiles;
+  } catch (error) {
+    if (state.commandPaletteToken === token) {
+      state.commandPaletteLoading = false;
+      renderCommandPalette();
+      setStatus(toErrorMessage(error));
+    }
+    return state.commandPaletteFiles;
+  }
+}
+
 function normalizeWorkspaceRelativePath(value) {
   const normalized = String(value || "").replace(/\\/g, "/").trim();
   if (!normalized || normalized === ".") {
@@ -1168,6 +1867,43 @@ function setBrowserPreviewState(preview) {
   renderFilePreview();
 }
 
+function createFilePreviewMediaNode(kind, source, label) {
+  const src = resolveMediaSource(source);
+  if (!src) {
+    return null;
+  }
+
+  if (kind === "image") {
+    const image = document.createElement("img");
+    image.className = "file-preview-media is-image";
+    image.src = src;
+    image.alt = label || "Preview image";
+    image.loading = "lazy";
+    return image;
+  }
+
+  if (kind === "video") {
+    const video = document.createElement("video");
+    video.className = "file-preview-media is-video";
+    video.src = src;
+    video.controls = true;
+    video.preload = "metadata";
+    video.playsInline = true;
+    return video;
+  }
+
+  if (kind === "audio") {
+    const audio = document.createElement("audio");
+    audio.className = "file-preview-media is-audio";
+    audio.src = src;
+    audio.controls = true;
+    audio.preload = "metadata";
+    return audio;
+  }
+
+  return null;
+}
+
 function projectNotesDirty() {
   return (
     state.projectNotesContent !== state.projectNotesSavedContent ||
@@ -1304,6 +2040,21 @@ function renderFilePreview() {
     notice.textContent = state.browserPreview.error || state.browserPreview.message;
     elements.filePreview.append(notice);
     return;
+  }
+
+  const mediaKind = inferMediaKind(
+    state.browserPreview.absolutePath || state.browserPreview.path || selectedPath,
+  );
+  if (mediaKind) {
+    const mediaNode = createFilePreviewMediaNode(
+      mediaKind,
+      state.browserPreview.absolutePath || state.browserPreview.path || selectedPath,
+      state.browserPreview.path || selectedPath,
+    );
+    if (mediaNode) {
+      elements.filePreview.append(mediaNode);
+      return;
+    }
   }
 
   if (state.browserPreview.isBinary) {
@@ -1562,6 +2313,7 @@ async function reloadWorkspaceBrowser() {
   state.selectedBrowserPath = null;
   state.browserPreview = null;
   state.browserPreviewLoading = false;
+  invalidateCommandPaletteFileIndex();
   renderWorkspaceTree();
   renderFilePreview();
 
@@ -1570,6 +2322,9 @@ async function reloadWorkspaceBrowser() {
   }
 
   await ensureWorkspaceTreeLoaded();
+  if (state.commandPaletteOpen) {
+    void ensureCommandPaletteFileIndex(true);
+  }
 }
 
 async function saveProjectNotesFromUi() {
@@ -2034,6 +2789,153 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function escapeHtmlAttribute(value) {
+  return escapeHtml(String(value || ""));
+}
+
+function stripMarkdownLinkTitle(rawTarget) {
+  const trimmed = String(rawTarget || "").trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  const withoutBrackets = trimmed.startsWith("<") && trimmed.endsWith(">") ? trimmed.slice(1, -1).trim() : trimmed;
+  const titleMatch = withoutBrackets.match(/^(.+?)\s+(?:"[^"]*"|'[^']*')$/);
+  return titleMatch ? titleMatch[1].trim() : withoutBrackets;
+}
+
+function inferMediaKind(rawTarget) {
+  const target = String(rawTarget || "").trim().split(/[?#]/, 1)[0].toLowerCase();
+  if (!target) {
+    return null;
+  }
+
+  if (target.startsWith("data:image/")) {
+    return "image";
+  }
+  if (target.startsWith("data:video/")) {
+    return "video";
+  }
+  if (target.startsWith("data:audio/")) {
+    return "audio";
+  }
+
+  if (/\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(target)) {
+    return "image";
+  }
+  if (/\.(mp4|webm|mov|m4v|ogv)$/i.test(target)) {
+    return "video";
+  }
+  if (/\.(mp3|wav|ogg|m4a|aac|flac|opus)$/i.test(target)) {
+    return "audio";
+  }
+
+  return null;
+}
+
+function toFileUrl(filePath) {
+  try {
+    if (typeof window.require === "function") {
+      const { pathToFileURL } = window.require("node:url");
+      return pathToFileURL(filePath).href;
+    }
+  } catch {
+    // Fall through to a best-effort file URL.
+  }
+
+  const normalized = String(filePath || "").replace(/\\/g, "/");
+  if (!normalized) {
+    return "";
+  }
+
+  const withLeadingSlash = normalized.startsWith("/") ? normalized : `/${normalized}`;
+  return `file://${encodeURI(withLeadingSlash)}`;
+}
+
+function resolveMediaSource(rawTarget) {
+  const target = stripMarkdownLinkTitle(rawTarget);
+  if (!target) {
+    return "";
+  }
+
+  if (/^(https?:|file:|blob:)/i.test(target)) {
+    return target;
+  }
+
+  if (/^data:(image|video|audio)\//i.test(target)) {
+    return target;
+  }
+
+  const looksAbsoluteWindowsPath = /^[a-z]:[\\/]/i.test(target);
+  const looksAbsolutePosixPath = target.startsWith("/");
+  if (looksAbsoluteWindowsPath || looksAbsolutePosixPath) {
+    return toFileUrl(target);
+  }
+
+  if (state.cwd && (/^\.\.?(\/|\\)/.test(target) || /^[^:]+[\\/]/.test(target) || inferMediaKind(target))) {
+    try {
+      if (typeof window.require === "function") {
+        const path = window.require("node:path");
+        return toFileUrl(path.resolve(state.cwd, target));
+      }
+    } catch {
+      // Fall back to the unresolved source.
+    }
+  }
+
+  return target;
+}
+
+function parseMarkdownMediaBlock(line) {
+  const match = String(line || "").match(/^\s*!\[([^\]]*)\]\((.+)\)\s*$/);
+  if (!match) {
+    return null;
+  }
+
+  const alt = match[1].trim();
+  const target = stripMarkdownLinkTitle(match[2]);
+  const kind = inferMediaKind(target);
+  if (!kind) {
+    return null;
+  }
+
+  const src = resolveMediaSource(target);
+  if (!src) {
+    return null;
+  }
+
+  return {
+    kind,
+    alt,
+    src,
+    rawTarget: target,
+  };
+}
+
+function hasMarkdownMedia(text) {
+  return /!\[[^\]]*\]\((.+)\)/.test(String(text || ""));
+}
+
+function renderMarkdownMedia(media) {
+  const alt = escapeHtmlAttribute(media.alt || "");
+  const src = escapeHtmlAttribute(media.src || "");
+  const caption = media.alt ? `<figcaption>${escapeHtml(media.alt)}</figcaption>` : "";
+
+  if (media.kind === "image") {
+    return `<figure class="markdown-media is-image"><img src="${src}" alt="${alt}" loading="lazy" />${caption}</figure>`;
+  }
+
+  if (media.kind === "video") {
+    return `<figure class="markdown-media is-video"><video controls preload="metadata" playsinline src="${src}"></video>${caption}</figure>`;
+  }
+
+  if (media.kind === "audio") {
+    return `<figure class="markdown-media is-audio"><audio controls preload="metadata" src="${src}"></audio>${caption}</figure>`;
+  }
+
+  return "";
+}
+
 function renderInlineMarkdown(text) {
   let html = escapeHtml(text);
   html = html.replace(/`([^`]+)`/g, "<code>$1</code>");
@@ -2183,6 +3085,14 @@ function renderMarkdown(text) {
       continue;
     }
 
+    const mediaBlock = parseMarkdownMediaBlock(line);
+    if (mediaBlock) {
+      flushParagraph();
+      flushList();
+      html.push(renderMarkdownMedia(mediaBlock));
+      continue;
+    }
+
     const nextLine = lines[index + 1];
     if (line.includes("|") && nextLine && isMarkdownTableDivider(nextLine)) {
       const headerCells = splitMarkdownTableRow(line);
@@ -2248,7 +3158,7 @@ function renderMarkdown(text) {
 }
 
 function setBubbleContent(bubble, role, text) {
-  if (role === "assistant" || role === "system") {
+  if (role === "assistant" || role === "system" || role === "user") {
     bubble.body.innerHTML = renderMarkdown(text);
   } else {
     bubble.body.textContent = text;
@@ -2598,12 +3508,16 @@ function createTimelineEntryElement(threadId, entry) {
   const card = document.createElement("article");
   card.className = "panel-entry";
   decorateTimelineEntry(card, entry.category);
+  card.dataset.entryId = entry.id;
 
   if (entry.compact) {
     card.classList.add("timeline-entry-compact");
   }
   if (entry.approval) {
     card.classList.add("timeline-entry-approval", "timeline-entry-elevated");
+    if (entry.approvalKind) {
+      card.classList.add(`timeline-entry-approval-${entry.approvalKind}`);
+    }
   }
   if (entry.diff) {
     card.classList.add("timeline-entry-edit", "timeline-entry-elevated");
@@ -2651,12 +3565,29 @@ function createTimelineEntryElement(threadId, entry) {
   if (entry.summary) {
     const summary = document.createElement("div");
     summary.className = "panel-entry-summary";
-    if (entry.markdown === true) {
+    if (entry.markdown === true || hasMarkdownMedia(entry.summary)) {
       summary.innerHTML = renderMarkdown(entry.summary);
     } else {
       summary.textContent = entry.summary;
     }
     card.append(summary);
+  }
+
+  if (Array.isArray(entry.badges) && entry.badges.length > 0) {
+    const badges = document.createElement("div");
+    badges.className = "panel-entry-badges";
+
+    for (const badge of entry.badges) {
+      const chip = document.createElement("span");
+      chip.className = "panel-entry-badge";
+      if (badge.tone) {
+        chip.classList.add(`is-${badge.tone}`);
+      }
+      chip.textContent = badge.label;
+      badges.append(chip);
+    }
+
+    card.append(badges);
   }
 
   if (Array.isArray(entry.files) && entry.files.length > 0) {
@@ -2727,6 +3658,7 @@ function appendTimelineEntry(threadId, entry) {
   const element = createTimelineEntryElement(threadId, entry);
   context.body.append(element);
   state.activityEntryMap.set(activityEntryKey(threadId, entry.id), { entry, element });
+  rebalanceThreadBatches(threadId);
   rebuildThreadTouchedFiles(threadId);
   if (!state.activeInspectorThreadId || state.activeInspectorThreadId === threadId) {
     setActiveInspectorThread(threadId);
@@ -2756,6 +3688,7 @@ function upsertTimelineEntry(threadId, nextEntry) {
   const nextElement = createTimelineEntryElement(threadId, merged);
   existing.element.replaceWith(nextElement);
   state.activityEntryMap.set(key, { entry: merged, element: nextElement });
+  rebalanceThreadBatches(threadId);
   rebuildThreadTouchedFiles(threadId);
   if (!state.activeInspectorThreadId || state.activeInspectorThreadId === threadId) {
     setActiveInspectorThread(threadId);
@@ -2851,6 +3784,266 @@ function lastPathSegment(value) {
 
 function pluralize(count, singular, plural = `${singular}s`) {
   return `${count} ${count === 1 ? singular : plural}`;
+}
+
+function toolBatchFamily(toolName) {
+  return TIMELINE_BATCH_FAMILIES.get(String(toolName || "").trim()) || null;
+}
+
+function isBatchableTimelineEntry(entry) {
+  if (!entry || entry.category !== "tools") {
+    return null;
+  }
+
+  if (entry.approval || entry.diff) {
+    return null;
+  }
+
+  if (entry.status === "failed" || entry.status === "error" || entry.status === "pending" || entry.status === "running") {
+    return null;
+  }
+
+  return entry.batchFamily || toolBatchFamily(entry.toolName || entry.title);
+}
+
+function getTimelineEntryRecord(threadId, entryId) {
+  return state.activityEntryMap.get(activityEntryKey(threadId, entryId)) || null;
+}
+
+function getTimelineEntryRecordFromElement(threadId, element) {
+  const entryId = element?.dataset?.entryId;
+  if (!entryId) {
+    return null;
+  }
+  return getTimelineEntryRecord(threadId, entryId);
+}
+
+function describeTimelineBatch(entries) {
+  const family = isBatchableTimelineEntry(entries[0]) || "inspection";
+  const stepCount = entries.length;
+  const files = uniqueWorkspacePaths(entries.flatMap((entry) => (Array.isArray(entry.files) ? entry.files : [])));
+  const lastMeta = entries[entries.length - 1]?.meta || "";
+  const allInformational = entries.every((entry) => entry.status === "info");
+
+  switch (family) {
+    case "file-read":
+      return {
+        family,
+        title: files.length > 0 ? `Read ${pluralize(files.length, "file")}` : `Read files in ${pluralize(stepCount, "step")}`,
+        summary: `Grouped ${pluralize(stepCount, "read-only inspection step")} to keep the timeline focused. Expand to inspect each result.`,
+        files,
+        meta: [pluralize(stepCount, "tool step"), lastMeta].filter(Boolean).join(" · "),
+        status: allInformational ? "info" : "completed",
+        statusLabel: pluralize(stepCount, "step"),
+      };
+    case "symbol-inspection":
+      return {
+        family,
+        title: `Inspected symbols in ${pluralize(stepCount, "step")}`,
+        summary: "Grouped symbol lookups and reference checks. Expand to inspect each result.",
+        files,
+        meta: [pluralize(stepCount, "tool step"), lastMeta].filter(Boolean).join(" · "),
+        status: allInformational ? "info" : "completed",
+        statusLabel: pluralize(stepCount, "step"),
+      };
+    case "text-search":
+      return {
+        family,
+        title: `Ran ${pluralize(stepCount, "search")}`,
+        summary: "Grouped repeated text searches. Expand to inspect each query and result.",
+        files,
+        meta: [pluralize(stepCount, "tool step"), lastMeta].filter(Boolean).join(" · "),
+        status: allInformational ? "info" : "completed",
+        statusLabel: pluralize(stepCount, "step"),
+      };
+    case "workspace-scan":
+      return {
+        family,
+        title: `Scanned workspace in ${pluralize(stepCount, "step")}`,
+        summary: "Grouped repeated workspace inspection steps. Expand to inspect each result.",
+        files,
+        meta: [pluralize(stepCount, "tool step"), lastMeta].filter(Boolean).join(" · "),
+        status: allInformational ? "info" : "completed",
+        statusLabel: pluralize(stepCount, "step"),
+      };
+    default:
+      return {
+        family,
+        title: `Grouped ${pluralize(stepCount, "tool step")}`,
+        summary: "Grouped repetitive tool activity. Expand to inspect each result.",
+        files,
+        meta: [pluralize(stepCount, "tool step"), lastMeta].filter(Boolean).join(" · "),
+        status: allInformational ? "info" : "completed",
+        statusLabel: pluralize(stepCount, "step"),
+      };
+  }
+}
+
+function createTimelineBatchElement(threadId, batchId, records) {
+  const entries = records.map((record) => record.entry);
+  const batch = describeTimelineBatch(entries);
+
+  const wrapper = document.createElement("details");
+  wrapper.className = "panel-entry timeline-batch";
+  decorateTimelineEntry(wrapper, "tools");
+  wrapper.dataset.batchId = batchId;
+  wrapper.dataset.batchFamily = batch.family;
+  wrapper.open = state.timelineBatchOpen.has(batchId);
+
+  const summary = document.createElement("summary");
+  summary.className = "timeline-batch-summary";
+
+  const label = document.createElement("div");
+  label.className = "panel-entry-label";
+  label.textContent = "Tool Batch";
+  summary.append(label);
+
+  const header = document.createElement("div");
+  header.className = "panel-entry-header";
+
+  const titleWrap = document.createElement("div");
+  titleWrap.className = "panel-entry-title";
+
+  const title = document.createElement("strong");
+  title.textContent = batch.title;
+
+  const meta = document.createElement("div");
+  meta.className = "panel-entry-meta";
+  meta.textContent = batch.meta;
+
+  titleWrap.append(title, meta);
+  header.append(titleWrap);
+
+  const status = document.createElement("div");
+  status.className = "panel-entry-status";
+  const tone = pickEntryTone(batch.status);
+  if (tone) {
+    status.classList.add(tone);
+  }
+  status.textContent = batch.statusLabel;
+  header.append(status);
+  summary.append(header);
+
+  const summaryText = document.createElement("div");
+  summaryText.className = "timeline-batch-text";
+  summaryText.textContent = batch.summary;
+  summary.append(summaryText);
+
+  if (batch.files.length > 0) {
+    const files = document.createElement("div");
+    files.className = "panel-entry-files timeline-batch-files";
+
+    for (const filePath of batch.files.slice(0, 6)) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "panel-entry-file-chip";
+      chip.textContent = filePath;
+      chip.title = filePath;
+      chip.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setActiveInspectorThread(threadId);
+        setInspectorCollapsed(false);
+        await previewWorkspaceFile(filePath);
+      });
+      files.append(chip);
+    }
+
+    if (batch.files.length > 6) {
+      const more = document.createElement("div");
+      more.className = "timeline-batch-more";
+      more.textContent = `+${batch.files.length - 6} more`;
+      files.append(more);
+    }
+
+    summary.append(files);
+  }
+
+  const caption = document.createElement("div");
+  caption.className = "timeline-batch-caption";
+  const updateCaption = () => {
+    caption.textContent = wrapper.open
+      ? `Collapse ${pluralize(records.length, "step")}`
+      : `Expand ${pluralize(records.length, "step")} to inspect each result`;
+  };
+  updateCaption();
+  summary.append(caption);
+
+  const content = document.createElement("div");
+  content.className = "timeline-batch-entries";
+
+  wrapper.addEventListener("toggle", () => {
+    if (wrapper.open) {
+      state.timelineBatchOpen.add(batchId);
+    } else {
+      state.timelineBatchOpen.delete(batchId);
+    }
+    updateCaption();
+  });
+
+  wrapper.append(summary, content);
+  return { wrapper, content };
+}
+
+function unwrapThreadBatches(body) {
+  const wrappers = [...body.children].filter((child) => child.classList?.contains("timeline-batch"));
+  for (const wrapper of wrappers) {
+    const content = wrapper.querySelector(".timeline-batch-entries");
+    const children = content ? [...content.children] : [];
+    for (const child of children) {
+      child.classList.remove("timeline-batch-child");
+      body.insertBefore(child, wrapper);
+    }
+    wrapper.remove();
+  }
+}
+
+function rebalanceThreadBatches(threadId) {
+  const context = state.threadContexts.get(threadId);
+  if (!context) {
+    return;
+  }
+
+  const body = context.body;
+  unwrapThreadBatches(body);
+
+  const children = [...body.children];
+  for (let index = 0; index < children.length; index += 1) {
+    const child = children[index];
+    const record = getTimelineEntryRecordFromElement(threadId, child);
+    const family = record ? isBatchableTimelineEntry(record.entry) : null;
+    if (!family) {
+      continue;
+    }
+
+    const records = [record];
+    const elementsToMove = [child];
+    let cursor = index + 1;
+
+    while (cursor < children.length) {
+      const nextChild = children[cursor];
+      const nextRecord = getTimelineEntryRecordFromElement(threadId, nextChild);
+      const nextFamily = nextRecord ? isBatchableTimelineEntry(nextRecord.entry) : null;
+      if (nextFamily !== family) {
+        break;
+      }
+      records.push(nextRecord);
+      elementsToMove.push(nextChild);
+      cursor += 1;
+    }
+
+    if (records.length >= TIMELINE_BATCH_MIN_SIZE) {
+      const batchId = `${threadId}:${family}:${records[0].entry.id}`;
+      const { wrapper, content } = createTimelineBatchElement(threadId, batchId, records);
+      body.insertBefore(wrapper, elementsToMove[0]);
+      for (const element of elementsToMove) {
+        element.classList.add("timeline-batch-child");
+        content.append(element);
+      }
+    }
+
+    index = cursor - 1;
+  }
 }
 
 function summarizePendingTool(toolName, inputArgs) {
@@ -3009,6 +4202,8 @@ function createPendingToolEntry(payload) {
   const toolCall = payload.toolCall;
   return {
     id: toolCall.callId,
+    toolName: toolCall.name,
+    batchFamily: toolBatchFamily(toolCall.name),
     category: COMMAND_TOOL_NAMES.has(toolCall.name) ? "commands" : "tools",
     label: COMMAND_TOOL_NAMES.has(toolCall.name) ? "Command" : "Tool",
     title: toolCall.name,
@@ -3040,6 +4235,8 @@ function createFinishedToolEntry(payload) {
 
   return {
     id: toolCall.callId,
+    toolName: toolCall.name,
+    batchFamily: toolBatchFamily(toolCall.name),
     category: COMMAND_TOOL_NAMES.has(toolCall.name) ? "commands" : "tools",
     label: COMMAND_TOOL_NAMES.has(toolCall.name) ? "Command" : "Tool",
     title: toolCall.name,
@@ -3079,70 +4276,279 @@ function splitApprovalSummary(summary) {
   };
 }
 
-async function respondToApproval(approval, approved) {
-  appendDebug(`approval:click ${approved ? "approve" : "deny"} requestId=${approval.requestId}`);
+function inferApprovalKind(approval, diffInfo) {
+  if (typeof approval?.approvalKind === "string" && approval.approvalKind) {
+    return approval.approvalKind;
+  }
+  if (COMMAND_TOOL_NAMES.has(approval?.toolName)) {
+    return "command";
+  }
+  if (diffInfo?.changedPaths?.length) {
+    return "write";
+  }
+  if (NETWORK_APPROVAL_TOOL_NAMES.has(approval?.toolName)) {
+    return "network";
+  }
+  return "generic";
+}
+
+function inferApprovalRiskLevel(approval, approvalKind, requestText, files) {
+  if (typeof approval?.riskLevel === "string" && approval.riskLevel) {
+    return approval.riskLevel;
+  }
+
+  if (approvalKind === "command") {
+    if (HIGH_RISK_COMMAND_PATTERN.test(requestText)) {
+      return "high";
+    }
+    if (MEDIUM_RISK_COMMAND_PATTERN.test(requestText)) {
+      return "medium";
+    }
+    return "medium";
+  }
+
+  if (approvalKind === "write") {
+    if (files.length >= 5 || files.some((filePath) => SENSITIVE_WRITE_PATH_PATTERN.test(filePath))) {
+      return "high";
+    }
+    if (files.length >= 2) {
+      return "medium";
+    }
+    return "low";
+  }
+
+  if (approvalKind === "network") {
+    return requestText.startsWith("fetch url:") ? "medium" : "low";
+  }
+
+  return "medium";
+}
+
+function approvalKindLabel(approvalKind) {
+  if (approvalKind === "write") {
+    return "File Write";
+  }
+  if (approvalKind === "command") {
+    return "Shell Command";
+  }
+  if (approvalKind === "network") {
+    return "External Request";
+  }
+  return "Sensitive Action";
+}
+
+function approvalEntryLabel(approvalKind) {
+  if (approvalKind === "write") {
+    return "Write Approval";
+  }
+  if (approvalKind === "command") {
+    return "Command Approval";
+  }
+  if (approvalKind === "network") {
+    return "Network Approval";
+  }
+  return "Approval";
+}
+
+function approvalRiskTone(riskLevel) {
+  if (riskLevel === "high") {
+    return "error";
+  }
+  if (riskLevel === "medium") {
+    return "warning";
+  }
+  if (riskLevel === "low") {
+    return "success";
+  }
+  return "neutral";
+}
+
+function buildApprovalBadges({ approvalKind, riskLevel, files, resolution }) {
+  const badges = [
+    {
+      label: approvalKindLabel(approvalKind),
+      tone: approvalKind === "write" ? "info" : approvalKind === "command" ? "warning" : "neutral",
+    },
+    {
+      label: `${String(riskLevel || "medium").replace(/^./, (char) => char.toUpperCase())} Risk`,
+      tone: approvalRiskTone(riskLevel),
+    },
+  ];
+
+  if (approvalKind === "write" && files.length > 0) {
+    badges.push({
+      label: pluralize(files.length, "File"),
+      tone: "neutral",
+    });
+  }
+
+  if (approvalKind === "write" && !elements.previewWritesToggle.checked) {
+    badges.push({
+      label: "Diff Previews Off",
+      tone: "neutral",
+    });
+  }
+
+  if (resolution === "approved-similar") {
+    badges.push({
+      label: "Similar This Run",
+      tone: "success",
+    });
+  }
+
+  if (resolution === "auto-approved") {
+    badges.push({
+      label: "Auto-approved",
+      tone: "success",
+    });
+  }
+
+  return badges;
+}
+
+function enablePreviewWritesFromApproval() {
+  if (elements.previewWritesToggle.checked) {
+    return;
+  }
+
+  elements.previewWritesToggle.checked = true;
+  syncTopbarState();
+  setStatus("Preview writes is now enabled for future runs. Save Defaults if you want to keep it for this workspace.");
+  for (const approval of state.approvals) {
+    upsertTimelineEntry(approval.threadId, createApprovalTimelineEntry(approval));
+  }
+}
+
+async function respondToApproval(approval, decision = "approve-once") {
+  const approved = decision !== "deny";
+  appendDebug(`approval:click ${decision} requestId=${approval.requestId}`);
   if (!desktopApi) {
     setStatus("Desktop IPC bridge is unavailable.");
     appendDebug("approval:error desktopApi missing");
     return;
   }
 
-  await desktopApi.respondApproval(approval.requestId, approved);
+  await desktopApi.respondApproval(approval.requestId, { decision });
   state.approvals = state.approvals.filter((item) => item.requestId !== approval.requestId);
-  upsertTimelineEntry(approval.threadId, createApprovalTimelineEntry(approval, approved ? "approved" : "denied"));
+  upsertTimelineEntry(
+    approval.threadId,
+    createApprovalTimelineEntry(
+      approval,
+      approved ? (decision === "approve-similar-run" ? "approved-similar" : "approved") : "denied",
+    ),
+  );
   updateProgress({
     phase: approved ? "running-tools" : "tool-error",
     activeToolName: approval.toolName,
   });
-  setStatus(`${approved ? "Approved" : "Denied"} ${approval.toolName}. Waiting for run to continue...`);
+  if (!approved) {
+    setStatus(`Denied ${approval.toolName}. Waiting for the run to react...`);
+    return;
+  }
+
+  if (decision === "approve-similar-run") {
+    setStatus(`Approved ${approval.toolName}. Similar requests in this run will continue automatically.`);
+    return;
+  }
+
+  setStatus(`Approved ${approval.toolName}. Waiting for the run to continue...`);
 }
 
 function createApprovalTimelineEntry(approval, resolution = "pending") {
   const { requestText, diffText } = splitApprovalSummary(approval.summary);
   const diffInfo = parseUnifiedDiff(diffText);
   const files = collectApprovalFiles(approval, diffInfo);
-  const status = resolution === "approved" ? "completed" : resolution === "denied" ? "failed" : "pending";
-  const statusLabel = resolution === "approved" ? "Approved" : resolution === "denied" ? "Denied" : "Needs Review";
+  const approvalKind = inferApprovalKind(approval, diffInfo);
+  const riskLevel = inferApprovalRiskLevel(approval, approvalKind, requestText, files);
+  const status = resolution === "denied" ? "failed" : resolution === "pending" ? "pending" : "completed";
+  const statusLabel =
+    resolution === "approved"
+      ? "Approved Once"
+      : resolution === "approved-similar"
+        ? "Approved for Similar Requests"
+        : resolution === "auto-approved"
+          ? "Auto-approved"
+          : resolution === "denied"
+            ? "Denied"
+            : "Needs Review";
+  const pendingSummary = requestText
+    ? truncateText(requestText, 240)
+    : `Review the ${approval.toolName} request before the run continues.`;
+  const resolutionSummary =
+    resolution === "approved"
+      ? `${approvalKindLabel(approvalKind)} approved once. The run can continue.`
+      : resolution === "approved-similar"
+        ? `${approvalKindLabel(approvalKind)} approved. Similar requests in this run will continue automatically.`
+        : resolution === "auto-approved"
+          ? `${approvalKindLabel(approvalKind)} matched an earlier approval in this run, so it continued automatically.`
+          : `${approvalKindLabel(approvalKind)} was denied.`;
 
   return {
     id: approval.requestId,
-    category: "tools",
-    label: "Approval",
+    category: approvalKind === "command" ? "commands" : "tools",
+    label: approvalEntryLabel(approvalKind),
     title: approval.toolName,
-    meta: resolution === "pending" ? "Action paused until you decide" : `Decision recorded ${formatTime(new Date().toISOString())}`,
+    meta:
+      resolution === "pending"
+        ? `${approvalKindLabel(approvalKind)} · Action paused until you decide`
+        : `${approvalKindLabel(approvalKind)} · Decision recorded ${formatTime(new Date().toISOString())}`,
     status,
     statusLabel,
-    summary: resolution === "pending"
-      ? `Review the ${approval.toolName} request before the run continues.`
-      : resolution === "approved"
-        ? `${approval.toolName} was approved and the run can continue.`
-        : `${approval.toolName} was denied.`,
+    summary: resolution === "pending" ? pendingSummary : resolutionSummary,
     requestText,
     diff: diffText,
     diffInfo,
     files,
     approval: true,
+    approvalKind,
+    badges: buildApprovalBadges({
+      approvalKind,
+      riskLevel,
+      files,
+      resolution,
+    }),
     renderActions: resolution !== "pending"
       ? null
       : () => {
           const actions = document.createElement("div");
           actions.className = "timeline-entry-actions";
+          const actionNodes = [];
 
           const approveButton = document.createElement("button");
           approveButton.className = "solid-button";
-          approveButton.textContent = "Approve";
+          approveButton.textContent = "Approve Once";
           approveButton.addEventListener("click", async () => {
-            await respondToApproval(approval, true);
+            await respondToApproval(approval, "approve-once");
           });
+          actionNodes.push(approveButton);
+
+          const approveSimilarButton = document.createElement("button");
+          approveSimilarButton.className = "ghost-button";
+          approveSimilarButton.textContent = "Approve Similar This Run";
+          approveSimilarButton.addEventListener("click", async () => {
+            await respondToApproval(approval, "approve-similar-run");
+          });
+          actionNodes.push(approveSimilarButton);
+
+          if (approvalKind === "write" && !elements.previewWritesToggle.checked) {
+            const previewWritesButton = document.createElement("button");
+            previewWritesButton.className = "ghost-button";
+            previewWritesButton.textContent = "Always Preview Writes";
+            previewWritesButton.addEventListener("click", () => {
+              enablePreviewWritesFromApproval();
+            });
+            actionNodes.push(previewWritesButton);
+          }
 
           const denyButton = document.createElement("button");
           denyButton.className = "ghost-button";
           denyButton.textContent = "Deny";
           denyButton.addEventListener("click", async () => {
-            await respondToApproval(approval, false);
+            await respondToApproval(approval, "deny");
           });
+          actionNodes.push(denyButton);
 
-          actions.append(approveButton, denyButton);
+          actions.append(...actionNodes);
           return actions;
         },
   };
@@ -3220,20 +4626,7 @@ function renderSessions() {
       openButton.append(branchStatus);
     }
     openButton.addEventListener("click", async () => {
-      if (!desktopApi) {
-        setStatus("Desktop IPC bridge is unavailable.");
-        return;
-      }
-      const loaded = await desktopApi.loadSession(state.cwd, session.id);
-      if (!loaded) {
-        return;
-      }
-      state.currentSessionId = loaded.id;
-      state.branchSessionId = null;
-      renderSessions();
-      renderSessionTranscript(loaded.events);
-      resetProgress();
-      setStatus("Conversation restored.");
+      await openSessionFromUi(session);
     });
 
     card.append(header, openButton);
@@ -3290,22 +4683,15 @@ async function branchSessionFromUi(session) {
     return;
   }
 
-  if (!desktopApi) {
-    setStatus("Desktop IPC bridge is unavailable.");
-    return;
-  }
-
-  const loaded = await desktopApi.loadSession(state.cwd, session.id);
+  const loaded = await openSessionFromUi(session, {
+    branch: true,
+    suppressStatus: true,
+  });
   if (!loaded) {
     setStatus("Could not load that session to branch.");
     return;
   }
 
-  state.currentSessionId = loaded.id;
-  state.branchSessionId = loaded.id;
-  renderSessions();
-  renderSessionTranscript(loaded.events);
-  resetProgress();
   setStatus(`Branching from "${truncateText(session.lastUserPrompt || "Untitled session", 64)}". The next run will be saved as a new session.`);
 }
 
@@ -3393,9 +4779,14 @@ function populateModelOptions(options, selectedModel) {
 }
 
 function applyConfigToUi(cwd, config, sessions, modelOptions, projectNotes) {
+  const previousCwd = state.cwd;
   state.cwd = cwd;
   state.modelOptions = Array.isArray(modelOptions) ? modelOptions : state.modelOptions;
   state.sessions = sessions || [];
+
+  if (previousCwd !== state.cwd) {
+    invalidateCommandPaletteFileIndex();
+  }
 
   elements.workspaceInput.value = state.cwd;
   elements.maxTurnsInput.value = String(config.maxTurns || 12);
@@ -3416,6 +4807,7 @@ function resetTranscriptView() {
   state.assistantStates = new Map();
   state.runThreadMap = new Map();
   state.activityEntryMap = new Map();
+  state.timelineBatchOpen = new Set();
   state.threadTouchedFiles = new Map();
   state.workspaceThreadId = null;
   state.pendingThreadId = null;
@@ -3947,6 +5339,26 @@ if (desktopApi) {
       return;
     }
 
+    if (payload.type === "approval-auto-resolved") {
+      const threadId =
+        (payload.runId ? state.runThreadMap.get(payload.runId) : null) ??
+        (state.currentRunId ? state.runThreadMap.get(state.currentRunId) : null) ??
+        state.pendingThreadId ??
+        ensureWorkspaceThread();
+      sealAssistantSegment(threadId);
+      const approval = {
+        ...payload,
+        threadId,
+      };
+      upsertTimelineEntry(threadId, createApprovalTimelineEntry(approval, "auto-approved"));
+      updateProgress({
+        phase: "running-tools",
+        activeToolName: payload.toolName,
+      });
+      setStatus(`Auto-approved ${payload.toolName} based on an earlier decision in this run.`);
+      return;
+    }
+
     if (payload.type === "run-started") {
       const threadId = state.pendingThreadId ?? startNewThread(payload.prompt || "", {
         threadIndex: payload.threadIndex,
@@ -4237,6 +5649,58 @@ elements.diffOpenFileButton.addEventListener("click", async () => {
   await openWorkspacePath(state.activeDiffFilePath);
 });
 
+elements.commandPaletteBackdrop.addEventListener("click", () => {
+  closeCommandPalette();
+});
+
+elements.commandPaletteInput.addEventListener("input", () => {
+  state.commandPaletteQuery = elements.commandPaletteInput.value;
+  state.commandPaletteSelectedIndex = 0;
+  renderCommandPalette();
+  if (state.cwd && !state.commandPaletteLoading && state.commandPaletteWorkspacePath !== state.cwd) {
+    void ensureCommandPaletteFileIndex();
+  }
+});
+
+elements.commandPaletteInput.addEventListener("keydown", async (event) => {
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    moveCommandPaletteSelection(1);
+    return;
+  }
+
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    moveCommandPaletteSelection(-1);
+    return;
+  }
+
+  if (event.key === "Home") {
+    event.preventDefault();
+    state.commandPaletteSelectedIndex = 0;
+    renderCommandPalette();
+    return;
+  }
+
+  if (event.key === "End") {
+    event.preventDefault();
+    state.commandPaletteSelectedIndex = Math.max(0, state.commandPaletteResults.length - 1);
+    renderCommandPalette();
+    return;
+  }
+
+  if (event.key === "Enter") {
+    event.preventDefault();
+    await executeCommandPaletteItem();
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    closeCommandPalette();
+  }
+});
+
 elements.saveConfigButton.addEventListener("click", async () => {
   try {
     await saveConfig();
@@ -4324,6 +5788,7 @@ renderFilePreview();
 renderProjectNotes();
 renderWorkingSet();
 renderDiffInspector();
+renderCommandPalette();
 setPreset(state.preset);
 syncTopbarState();
 loadRunDetailsPreference();
@@ -4335,4 +5800,16 @@ bootstrap();
 window.addEventListener("resize", () => {
   fitAllSessionCards();
   applyInspectorSplit(state.inspectorSplitRatio);
+});
+window.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    toggleCommandPalette();
+    return;
+  }
+
+  if (state.commandPaletteOpen && event.key === "Escape") {
+    event.preventDefault();
+    closeCommandPalette();
+  }
 });

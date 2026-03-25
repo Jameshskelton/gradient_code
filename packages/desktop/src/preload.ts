@@ -21,8 +21,8 @@ const desktopApi = {
   saveConfig: (cwd: string, config: GradientCodeConfig) => ipcRenderer.invoke("desktop:save-config", cwd, config),
   startRun: (payload: Record<string, unknown>) => ipcRenderer.invoke("desktop:start-run", payload),
   cancelRun: () => ipcRenderer.invoke("desktop:cancel-run"),
-  respondApproval: (requestId: string, approved: boolean) =>
-    ipcRenderer.invoke("desktop:respond-approval", requestId, approved),
+  respondApproval: (requestId: string, response: { decision?: "approve-once" | "approve-similar-run" | "deny" }) =>
+    ipcRenderer.invoke("desktop:respond-approval", requestId, response),
   onEvent: (callback: (payload: Record<string, unknown>) => void) => {
     const listener = (_event: unknown, payload: Record<string, unknown>) => callback(payload);
     ipcRenderer.on("desktop:event", listener);

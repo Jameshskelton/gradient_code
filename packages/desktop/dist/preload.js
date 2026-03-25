@@ -15,7 +15,7 @@ const desktopApi = {
     saveConfig: (cwd, config) => ipcRenderer.invoke("desktop:save-config", cwd, config),
     startRun: (payload) => ipcRenderer.invoke("desktop:start-run", payload),
     cancelRun: () => ipcRenderer.invoke("desktop:cancel-run"),
-    respondApproval: (requestId, approved) => ipcRenderer.invoke("desktop:respond-approval", requestId, approved),
+    respondApproval: (requestId, response) => ipcRenderer.invoke("desktop:respond-approval", requestId, response),
     onEvent: (callback) => {
         const listener = (_event, payload) => callback(payload);
         ipcRenderer.on("desktop:event", listener);

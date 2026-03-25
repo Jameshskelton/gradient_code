@@ -24,6 +24,11 @@ let mainWindow = null;
 let activeRun = false;
 let activeRunAbortController = null;
 const pendingApprovals = new Map();
+const approvalRulesThisRun = new Map();
+const NETWORK_APPROVAL_TOOL_NAMES = new Set(["web_search", "fetch_url"]);
+const HIGH_RISK_COMMAND_PATTERN = /\b(rm|sudo|chmod|chown|dd|mkfs|launchctl|killall|pkill)\b|git\s+(reset|clean)\b|npm\s+publish\b|pnpm\s+publish\b|yarn\s+publish\b|cargo\s+publish\b|curl\b.*\|\s*(sh|bash|zsh)\b|wget\b.*\|\s*(sh|bash|zsh)\b|[>|]{2}|[|]\s*(sh|bash|zsh)\b/i;
+const MEDIUM_RISK_COMMAND_PATTERN = /\b(npm|pnpm|yarn|bun|cargo|go|pytest|vitest|jest|playwright|cypress|make|docker|kubectl|terraform|gradle|mvn|swift|xcodebuild)\b/i;
+const SENSITIVE_WRITE_PATH_PATTERN = /(^|\/)(package(-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lockb|Dockerfile|docker-compose\.(yml|yaml)|\.env($|\.)|\.github\/|tsconfig(\.[^.]+)?\.json$|vite\.config|webpack\.config|rollup\.config|eslint\.config|prettier\.config|turbo\.json$|vercel\.json$|pnpm-workspace\.yaml$)/i;
 function normalizeModelName(model) {
     const trimmed = model.trim();
     const lowered = trimmed.toLowerCase();
@@ -108,6 +113,127 @@ function isCommandToolName(toolName) {
         "send_process_input",
         "close_command_session",
     ].includes(toolName);
+}
+function splitApprovalSummary(summary) {
+    const normalized = String(summary || "").trim();
+    if (!normalized) {
+        return {
+            requestText: "",
+            diffText: "",
+        };
+    }
+    const diffMatch = normalized.match(/(^diff --git .*$|^--- .*$|^@@ .*$)/m);
+    if (!diffMatch || typeof diffMatch.index !== "number") {
+        return {
+            requestText: normalized,
+            diffText: "",
+        };
+    }
+    return {
+        requestText: normalized.slice(0, diffMatch.index).trim(),
+        diffText: normalized.slice(diffMatch.index).trim(),
+    };
+}
+function extractDiffPaths(diffText) {
+    const normalized = String(diffText || "");
+    if (!normalized.trim()) {
+        return [];
+    }
+    const paths = new Set();
+    for (const line of normalized.split(/\r?\n/)) {
+        if (line.startsWith("diff --git ")) {
+            const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+            if (match?.[2]) {
+                paths.add(match[2]);
+            }
+            continue;
+        }
+        if (line.startsWith("+++ ")) {
+            const candidate = line.slice(4).trim();
+            if (!candidate || candidate === "/dev/null") {
+                continue;
+            }
+            paths.add(candidate.replace(/^b\//, ""));
+        }
+    }
+    return [...paths].sort((left, right) => left.localeCompare(right));
+}
+function normalizeApprovalText(value) {
+    return String(value || "")
+        .toLowerCase()
+        .replace(/approval-[a-z0-9-]+/g, "<approval>")
+        .replace(/session-[a-z0-9-]+/g, "<session>")
+        .replace(/\/(?:users|home)\/[^\s]+/g, "<path>")
+        .replace(/[a-z]:\\[^\s]+/gi, "<path>")
+        .replace(/\b\d+\b/g, "<n>")
+        .replace(/\s+/g, " ")
+        .trim();
+}
+function classifyApprovalKind(toolName, diffText) {
+    if (isCommandToolName(toolName)) {
+        return "command";
+    }
+    if (extractDiffPaths(diffText).length > 0) {
+        return "write";
+    }
+    if (NETWORK_APPROVAL_TOOL_NAMES.has(toolName)) {
+        return "network";
+    }
+    return "generic";
+}
+function inferApprovalRiskLevel(approvalKind, requestText, diffPaths) {
+    if (approvalKind === "command") {
+        if (HIGH_RISK_COMMAND_PATTERN.test(requestText)) {
+            return "high";
+        }
+        if (MEDIUM_RISK_COMMAND_PATTERN.test(requestText)) {
+            return "medium";
+        }
+        return "medium";
+    }
+    if (approvalKind === "write") {
+        if (diffPaths.length >= 5 || diffPaths.some((filePath) => SENSITIVE_WRITE_PATH_PATTERN.test(filePath))) {
+            return "high";
+        }
+        if (diffPaths.length >= 2) {
+            return "medium";
+        }
+        return "low";
+    }
+    if (approvalKind === "network") {
+        return requestText.startsWith("fetch url:") ? "medium" : "low";
+    }
+    return "medium";
+}
+function buildApprovalFingerprint(approvalKind, toolName, requestText, diffPaths) {
+    const normalizedRequest = normalizeApprovalText(requestText);
+    if (approvalKind === "write" && diffPaths.length > 0) {
+        return `${approvalKind}:${toolName}:${diffPaths.map((entry) => normalizeApprovalText(entry)).join("|")}`;
+    }
+    if (approvalKind === "command") {
+        const command = normalizedRequest || normalizeApprovalText(toolName);
+        const executable = command.split(/\s+/, 1)[0] || toolName;
+        return `${approvalKind}:${toolName}:${executable}:${command}`;
+    }
+    return `${approvalKind}:${toolName}:${normalizedRequest}`;
+}
+function describeApprovalRequest(runId, toolName, summary) {
+    const requestId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const { requestText, diffText } = splitApprovalSummary(summary);
+    const diffPaths = extractDiffPaths(diffText);
+    const approvalKind = classifyApprovalKind(toolName, diffText);
+    const riskLevel = inferApprovalRiskLevel(approvalKind, requestText, diffPaths);
+    return {
+        requestId,
+        runId,
+        toolName,
+        summary,
+        requestText,
+        diffText,
+        approvalKind,
+        riskLevel,
+        fingerprint: buildApprovalFingerprint(approvalKind, toolName, requestText, diffPaths),
+    };
 }
 function mergeUsage(existing, incoming) {
     if (!existing && !incoming) {
@@ -299,7 +425,7 @@ function emitRunProgress(progress) {
         ...progress,
     });
 }
-function createApprovalTool(approveAll) {
+function createApprovalTool(approveAll, runId) {
     return {
         name: "__approval__",
         description: "Internal tool for asking the user whether a sensitive action is allowed.",
@@ -315,15 +441,21 @@ function createApprovalTool(approveAll) {
             if (approveAll) {
                 return { ok: true, toolName: this.name, content: "approved" };
             }
-            const requestId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+            const request = describeApprovalRequest(runId, String(inputArgs.toolName ?? "tool"), String(inputArgs.summary ?? ""));
+            if (approvalRulesThisRun.has(request.fingerprint)) {
+                sendEvent({
+                    type: "approval-auto-resolved",
+                    ...request,
+                    scope: "similar-this-run",
+                });
+                return { ok: true, toolName: this.name, content: "approved" };
+            }
             sendEvent({
                 type: "approval-request",
-                requestId,
-                toolName: String(inputArgs.toolName ?? "tool"),
-                summary: String(inputArgs.summary ?? ""),
+                ...request,
             });
             const approved = await new Promise((resolve) => {
-                pendingApprovals.set(requestId, { resolve });
+                pendingApprovals.set(request.requestId, { resolve, request });
             });
             return { ok: true, toolName: this.name, content: approved ? "approved" : "denied" };
         },
@@ -448,26 +580,39 @@ ipcMain.handle("desktop:save-project-notes", async (_event, cwd, payload) => {
 ipcMain.handle("desktop:open-project-notes", async (_event, cwd) => {
     return openProjectNotesFile(cwd);
 });
-ipcMain.handle("desktop:respond-approval", async (_event, requestId, approved) => {
+ipcMain.handle("desktop:respond-approval", async (_event, requestId, response) => {
+    const decision = typeof response === "boolean"
+        ? response
+            ? "approve-once"
+            : "deny"
+        : response?.decision === "approve-similar-run"
+            ? "approve-similar-run"
+            : response?.decision === "deny"
+                ? "deny"
+                : "approve-once";
+    const approved = decision !== "deny";
     sendEvent({
         type: "debug-log",
-        message: `desktop:respond-approval received requestId=${requestId} approved=${String(approved)}`,
+        message: `desktop:respond-approval received requestId=${requestId} decision=${decision}`,
     });
     const pending = pendingApprovals.get(requestId);
     if (pending) {
+        if (decision === "approve-similar-run") {
+            approvalRulesThisRun.set(pending.request.fingerprint, pending.request);
+        }
         pending.resolve(approved);
         pendingApprovals.delete(requestId);
         sendEvent({
             type: "debug-log",
-            message: `desktop:respond-approval resolved requestId=${requestId}`,
+            message: `desktop:respond-approval resolved requestId=${requestId} decision=${decision}`,
         });
+        return { ok: true, decision };
     }
-    else {
-        sendEvent({
-            type: "debug-log",
-            message: `desktop:respond-approval missing requestId=${requestId}`,
-        });
-    }
+    sendEvent({
+        type: "debug-log",
+        message: `desktop:respond-approval missing requestId=${requestId}`,
+    });
+    return { ok: false, decision };
 });
 ipcMain.handle("desktop:cancel-run", async () => {
     if (!activeRunAbortController) {
@@ -486,6 +631,7 @@ ipcMain.handle("desktop:cancel-run", async () => {
             message: `desktop:cancel-run released approval requestId=${requestId}`,
         });
     }
+    approvalRulesThisRun.clear();
     return { ok: true, cancelled: true };
 });
 ipcMain.handle("desktop:start-run", async (_event, payload) => {
@@ -554,11 +700,12 @@ ipcMain.handle("desktop:start-run", async (_event, payload) => {
                 });
             },
         });
+        approvalRulesThisRun.clear();
         sendEvent({
             type: "debug-log",
             message: `Provider initialized baseUrl=${String(fileConfig.baseUrl ?? process.env.GRADIENT_BASE_URL ?? "default")} resumed=${String(Boolean(resumed))}`,
         });
-        const toolRegistry = new ToolRegistry([...getDefaultTools(), createApprovalTool(approveAll)]);
+        const toolRegistry = new ToolRegistry([...getDefaultTools(), createApprovalTool(approveAll, runId)]);
         const projectNotes = await loadProjectNotes(cwd, fileConfig);
         const systemPrompt = buildAgentSystemPrompt({
             cwd,
@@ -719,6 +866,7 @@ ipcMain.handle("desktop:start-run", async (_event, payload) => {
     finally {
         activeRun = false;
         activeRunAbortController = null;
+        approvalRulesThisRun.clear();
     }
 });
 app.whenReady().then(async () => {
