@@ -5,6 +5,12 @@ const desktopApi = {
   getBootstrap: (cwd?: string) => ipcRenderer.invoke("desktop:get-bootstrap", cwd),
   chooseWorkspace: (cwd?: string) => ipcRenderer.invoke("desktop:choose-workspace", cwd),
   listSessions: (cwd: string) => ipcRenderer.invoke("desktop:list-sessions", cwd),
+  listWorkspaceTree: (cwd: string, relativePath?: string) =>
+    ipcRenderer.invoke("desktop:list-workspace-tree", cwd, relativePath),
+  readWorkspaceFile: (cwd: string, relativePath: string) =>
+    ipcRenderer.invoke("desktop:read-workspace-file", cwd, relativePath),
+  openWorkspacePath: (cwd: string, relativePath: string) =>
+    ipcRenderer.invoke("desktop:open-workspace-path", cwd, relativePath),
   loadSession: (cwd: string, sessionId: string) => ipcRenderer.invoke("desktop:load-session", cwd, sessionId),
   deleteSession: (cwd: string, sessionId: string) => ipcRenderer.invoke("desktop:delete-session", cwd, sessionId),
   saveConfig: (cwd: string, config: GradientCodeConfig) => ipcRenderer.invoke("desktop:save-config", cwd, config),

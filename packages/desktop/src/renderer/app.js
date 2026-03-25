@@ -42,6 +42,11 @@ const PRESET_BY_ID = new Map(PRESET_OPTIONS.map((option) => [option.id, option])
 
 const RUN_DETAILS_COLLAPSED_KEY = "gradient-code:run-details-collapsed";
 const TOPBAR_COLLAPSED_KEY = "gradient-code:topbar-collapsed";
+const INSPECTOR_COLLAPSED_KEY = "gradient-code:inspector-collapsed";
+const INSPECTOR_TABS = [
+  { id: "browser", label: "Browser" },
+  { id: "working-set", label: "Working Set" },
+];
 const ACTIVITY_FILTERS = [
   { id: "conversation", label: "Conversation", activeByDefault: true },
   { id: "tools", label: "Tools", activeByDefault: true },
@@ -63,6 +68,20 @@ const state = {
   topbarCollapsed: false,
   topbarCollapsedPreference: false,
   topbarQuickEditor: null,
+  inspectorCollapsed: true,
+  inspectorCollapsedPreference: true,
+  inspectorTab: "browser",
+  workspaceTreeEntries: new Map(),
+  workspaceTreeLoading: new Set(),
+  expandedWorkspacePaths: new Set([""]),
+  selectedBrowserPath: null,
+  browserPreview: null,
+  browserPreviewLoading: false,
+  activeInspectorThreadId: null,
+  threadTouchedFiles: new Map(),
+  activeDiff: null,
+  activeDiffFilePath: null,
+  diffViewMode: "unified",
   cancelRequested: false,
   progress: createDefaultProgressState(),
   threadContexts: new Map(),
@@ -104,6 +123,9 @@ function createDesktopApiFallback() {
     return {
       getBootstrap: (cwd) => ipcRenderer.invoke("desktop:get-bootstrap", cwd),
       chooseWorkspace: (cwd) => ipcRenderer.invoke("desktop:choose-workspace", cwd),
+      listWorkspaceTree: (cwd, relativePath) => ipcRenderer.invoke("desktop:list-workspace-tree", cwd, relativePath),
+      readWorkspaceFile: (cwd, relativePath) => ipcRenderer.invoke("desktop:read-workspace-file", cwd, relativePath),
+      openWorkspacePath: (cwd, relativePath) => ipcRenderer.invoke("desktop:open-workspace-path", cwd, relativePath),
       listSessions: (cwd) => ipcRenderer.invoke("desktop:list-sessions", cwd),
       loadSession: (cwd, sessionId) => ipcRenderer.invoke("desktop:load-session", cwd, sessionId),
       deleteSession: (cwd, sessionId) => ipcRenderer.invoke("desktop:delete-session", cwd, sessionId),
@@ -143,6 +165,25 @@ const elements = {
   collapsedModelInput: document.getElementById("collapsedModelInput"),
   collapsedTurnsInput: document.getElementById("collapsedTurnsInput"),
   topbarQuickCloseButton: document.getElementById("topbarQuickCloseButton"),
+  inspectorContext: document.getElementById("inspectorContext"),
+  inspectorTabs: document.getElementById("inspectorTabs"),
+  reloadWorkspaceTreeButton: document.getElementById("reloadWorkspaceTreeButton"),
+  openSelectedFileButton: document.getElementById("openSelectedFileButton"),
+  browserView: document.getElementById("browserView"),
+  workingSetView: document.getElementById("workingSetView"),
+  workspaceTree: document.getElementById("workspaceTree"),
+  filePreview: document.getElementById("filePreview"),
+  workingSetSummary: document.getElementById("workingSetSummary"),
+  workingSetList: document.getElementById("workingSetList"),
+  diffInspectorMeta: document.getElementById("diffInspectorMeta"),
+  diffUnifiedButton: document.getElementById("diffUnifiedButton"),
+  diffSplitButton: document.getElementById("diffSplitButton"),
+  diffInspectorEmpty: document.getElementById("diffInspectorEmpty"),
+  diffInspectorSurface: document.getElementById("diffInspectorSurface"),
+  diffFileTabs: document.getElementById("diffFileTabs"),
+  diffPreviewFileButton: document.getElementById("diffPreviewFileButton"),
+  diffOpenFileButton: document.getElementById("diffOpenFileButton"),
+  diffInspectorContent: document.getElementById("diffInspectorContent"),
   statusBar: document.getElementById("statusBar"),
   statusBarText: document.getElementById("statusBarText"),
   progressToggle: document.getElementById("progressToggle"),
@@ -153,6 +194,7 @@ const elements = {
   progressBarFill: document.getElementById("progressBarFill"),
   presetChips: document.getElementById("presetChips"),
   activityFilters: document.getElementById("activityFilters"),
+  inspectorToggleButton: document.getElementById("inspectorToggleButton"),
   transcript: document.getElementById("transcript"),
   composerForm: document.getElementById("composerForm"),
   promptInput: document.getElementById("promptInput"),
@@ -393,6 +435,29 @@ function syncTopbarState() {
   renderTopbarQuickEditor();
 }
 
+function applyInspectorCollapsed(collapsed) {
+  state.inspectorCollapsed = Boolean(collapsed);
+  document.body.classList.toggle("detail-pane-collapsed", state.inspectorCollapsed);
+  elements.inspectorToggleButton.textContent = state.inspectorCollapsed ? "Show Inspector" : "Hide Inspector";
+  elements.inspectorToggleButton.setAttribute("aria-expanded", String(!state.inspectorCollapsed));
+}
+
+function loadInspectorPreference() {
+  const raw = window.localStorage.getItem(INSPECTOR_COLLAPSED_KEY);
+  state.inspectorCollapsedPreference = raw === null ? true : raw === "true";
+  applyInspectorCollapsed(state.inspectorCollapsedPreference);
+}
+
+function saveInspectorPreference() {
+  window.localStorage.setItem(INSPECTOR_COLLAPSED_KEY, String(state.inspectorCollapsedPreference));
+}
+
+function setInspectorCollapsed(collapsed) {
+  state.inspectorCollapsedPreference = Boolean(collapsed);
+  applyInspectorCollapsed(state.inspectorCollapsedPreference);
+  saveInspectorPreference();
+}
+
 function toErrorMessage(error) {
   if (error instanceof Error && error.message) {
     return error.message;
@@ -471,6 +536,1073 @@ function renderActivityFilters() {
     });
     elements.activityFilters.append(button);
   }
+}
+
+function normalizeWorkspaceRelativePath(value) {
+  const normalized = String(value || "").replace(/\\/g, "/").trim();
+  if (!normalized || normalized === ".") {
+    return "";
+  }
+
+  let next = normalized;
+  const cwd = String(state.cwd || "").replace(/\\/g, "/").trim();
+  if (cwd && (next === cwd || next.startsWith(`${cwd}/`))) {
+    next = next.slice(cwd.length).replace(/^\/+/, "");
+  }
+
+  while (next.startsWith("./")) {
+    next = next.slice(2);
+  }
+
+  if (!next || next === "." || next.startsWith("../")) {
+    return "";
+  }
+
+  return next;
+}
+
+function uniqueWorkspacePaths(values) {
+  const seen = new Set();
+  const result = [];
+  for (const value of values) {
+    const normalized = normalizeWorkspaceRelativePath(value);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    result.push(normalized);
+  }
+  return result;
+}
+
+function parentWorkspacePath(relativePath) {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  if (!normalized || !normalized.includes("/")) {
+    return "";
+  }
+  return normalized.slice(0, normalized.lastIndexOf("/"));
+}
+
+function workspaceAncestors(relativePath) {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  if (!normalized) {
+    return [];
+  }
+
+  const parts = normalized.split("/");
+  const result = [];
+  for (let index = 1; index < parts.length; index += 1) {
+    result.push(parts.slice(0, index).join("/"));
+  }
+  return result;
+}
+
+function stripDiffPathPrefix(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed || trimmed === "/dev/null") {
+    return "";
+  }
+
+  const withoutQuotes = trimmed.replace(/^"(.*)"$/, "$1");
+  if (withoutQuotes.startsWith("a/") || withoutQuotes.startsWith("b/")) {
+    return normalizeWorkspaceRelativePath(withoutQuotes.slice(2));
+  }
+
+  return normalizeWorkspaceRelativePath(withoutQuotes);
+}
+
+function parseUnifiedDiff(diffText) {
+  const raw = String(diffText || "").replace(/\r\n/g, "\n").trim();
+  if (!raw) {
+    return {
+      raw: "",
+      files: [],
+      changedPaths: [],
+    };
+  }
+
+  const lines = raw.split("\n");
+  const files = [];
+  let current = null;
+
+  function ensureCurrent() {
+    if (current) {
+      return current;
+    }
+
+    current = {
+      path: "",
+      oldPath: "",
+      newPath: "",
+      status: "modified",
+      headerLines: [],
+      hunks: [],
+      rawLines: [],
+    };
+    return current;
+  }
+
+  function pushCurrent() {
+    if (!current) {
+      return;
+    }
+
+    const fallbackPath = current.newPath || current.oldPath || current.path || "";
+    current.path = normalizeWorkspaceRelativePath(fallbackPath);
+
+    if (current.status === "modified") {
+      if (!current.oldPath && current.newPath) {
+        current.status = "added";
+      } else if (current.oldPath && !current.newPath) {
+        current.status = "deleted";
+      } else if (current.oldPath && current.newPath && current.oldPath !== current.newPath) {
+        current.status = "renamed";
+      }
+    }
+
+    files.push(current);
+    current = null;
+  }
+
+  for (const line of lines) {
+    if (line.startsWith("diff --git ")) {
+      pushCurrent();
+      const match = line.match(/^diff --git a\/(.+?) b\/(.+)$/);
+      current = {
+        path: "",
+        oldPath: stripDiffPathPrefix(match?.[1] || ""),
+        newPath: stripDiffPathPrefix(match?.[2] || ""),
+        status: "modified",
+        headerLines: [line],
+        hunks: [],
+        rawLines: [line],
+      };
+      continue;
+    }
+
+    const target = ensureCurrent();
+    target.rawLines.push(line);
+
+    if (line.startsWith("new file mode ")) {
+      target.status = "added";
+      target.headerLines.push(line);
+      continue;
+    }
+
+    if (line.startsWith("deleted file mode ")) {
+      target.status = "deleted";
+      target.headerLines.push(line);
+      continue;
+    }
+
+    if (line.startsWith("rename from ")) {
+      target.status = "renamed";
+      target.oldPath = normalizeWorkspaceRelativePath(line.slice("rename from ".length));
+      target.headerLines.push(line);
+      continue;
+    }
+
+    if (line.startsWith("rename to ")) {
+      target.status = "renamed";
+      target.newPath = normalizeWorkspaceRelativePath(line.slice("rename to ".length));
+      target.headerLines.push(line);
+      continue;
+    }
+
+    if (line.startsWith("--- ")) {
+      target.oldPath = stripDiffPathPrefix(line.slice(4).trim().split(/\s+/)[0]);
+      target.headerLines.push(line);
+      continue;
+    }
+
+    if (line.startsWith("+++ ")) {
+      target.newPath = stripDiffPathPrefix(line.slice(4).trim().split(/\s+/)[0]);
+      target.headerLines.push(line);
+      continue;
+    }
+
+    if (line.startsWith("@@")) {
+      target.hunks.push({
+        header: line,
+        lines: [],
+      });
+      continue;
+    }
+
+    if (target.hunks.length > 0) {
+      target.hunks[target.hunks.length - 1].lines.push(line);
+    } else {
+      target.headerLines.push(line);
+    }
+  }
+
+  pushCurrent();
+
+  const changedPaths = uniqueWorkspacePaths(files.map((file) => file.path || file.newPath || file.oldPath).filter(Boolean));
+  return {
+    raw,
+    files,
+    changedPaths,
+  };
+}
+
+function buildSplitDiffRows(file) {
+  const rows = [];
+
+  for (const hunk of file.hunks) {
+    rows.push({
+      type: "hunk",
+      text: hunk.header,
+    });
+
+    const removals = [];
+    const additions = [];
+
+    function flushChanges() {
+      const maxRows = Math.max(removals.length, additions.length);
+      for (let index = 0; index < maxRows; index += 1) {
+        const left = removals[index];
+        const right = additions[index];
+        rows.push({
+          type: "change",
+          left: left ?? "",
+          right: right ?? "",
+          leftTone: left === undefined ? "empty" : "remove",
+          rightTone: right === undefined ? "empty" : "add",
+        });
+      }
+      removals.length = 0;
+      additions.length = 0;
+    }
+
+    for (const line of hunk.lines) {
+      if (line.startsWith("-")) {
+        removals.push(line.slice(1));
+        continue;
+      }
+
+      if (line.startsWith("+")) {
+        additions.push(line.slice(1));
+        continue;
+      }
+
+      flushChanges();
+
+      if (line.startsWith(" ")) {
+        rows.push({
+          type: "context",
+          left: line.slice(1),
+          right: line.slice(1),
+          leftTone: "context",
+          rightTone: "context",
+        });
+        continue;
+      }
+
+      rows.push({
+        type: "note",
+        text: line,
+      });
+    }
+
+    flushChanges();
+  }
+
+  return rows;
+}
+
+function collectToolResultFiles(toolCall, result, diffInfo) {
+  const metadata = result?.metadata || {};
+  const files = [];
+
+  if (typeof metadata.path === "string") {
+    files.push(metadata.path);
+  }
+
+  if (Array.isArray(metadata.paths)) {
+    files.push(...metadata.paths);
+  }
+
+  if (Array.isArray(metadata.files)) {
+    files.push(...metadata.files);
+  }
+
+  if (Array.isArray(toolCall?.arguments?.paths) && ["read_many_files"].includes(toolCall.name)) {
+    files.push(...toolCall.arguments.paths);
+  }
+
+  if (typeof toolCall?.arguments?.path === "string" && ["read_file", "write_file", "create_file", "inspect_path"].includes(toolCall.name)) {
+    files.push(toolCall.arguments.path);
+  }
+
+  if (diffInfo?.changedPaths?.length) {
+    files.push(...diffInfo.changedPaths);
+  }
+
+  return uniqueWorkspacePaths(files);
+}
+
+function collectApprovalFiles(approval, diffInfo) {
+  const files = [];
+
+  if (diffInfo?.changedPaths?.length) {
+    files.push(...diffInfo.changedPaths);
+  }
+
+  return uniqueWorkspacePaths(files);
+}
+
+function renderInspectorTabs() {
+  elements.inspectorTabs.textContent = "";
+  for (const tab of INSPECTOR_TABS) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "ghost-button inspector-tab-button";
+    button.textContent = tab.label;
+    button.dataset.tab = tab.id;
+    button.classList.toggle("is-active", state.inspectorTab === tab.id);
+    button.setAttribute("aria-pressed", String(state.inspectorTab === tab.id));
+    button.addEventListener("click", () => {
+      setInspectorTab(tab.id);
+    });
+    elements.inspectorTabs.append(button);
+  }
+
+  elements.browserView.classList.toggle("hidden", state.inspectorTab !== "browser");
+  elements.workingSetView.classList.toggle("hidden", state.inspectorTab !== "working-set");
+}
+
+function rebuildThreadTouchedFiles(threadId) {
+  if (!threadId) {
+    return new Map();
+  }
+
+  const touched = new Map();
+  let order = 0;
+
+  for (const [key, value] of state.activityEntryMap.entries()) {
+    if (!key.startsWith(`${threadId}:`)) {
+      continue;
+    }
+
+    order += 1;
+    const entry = value.entry;
+    const files = Array.isArray(entry.files) ? entry.files : [];
+    if (files.length === 0) {
+      continue;
+    }
+
+    const diffPaths = entry.diffInfo?.changedPaths || [];
+
+    for (const path of files) {
+      const existing = touched.get(path) || {
+        path,
+        count: 0,
+        title: "",
+        label: "",
+        meta: "",
+        category: "",
+        order: 0,
+        diffEntry: null,
+      };
+
+      existing.count += 1;
+      existing.title = entry.title;
+      existing.label = entry.label;
+      existing.meta = entry.meta;
+      existing.category = entry.category;
+      existing.order = order;
+
+      if (entry.diff && (diffPaths.includes(path) || diffPaths.length === 1)) {
+        existing.diffEntry = entry;
+      }
+
+      touched.set(path, existing);
+    }
+  }
+
+  state.threadTouchedFiles.set(threadId, touched);
+  return touched;
+}
+
+function renderInspectorContext() {
+  const workspaceLabel = state.cwd ? formatWorkspaceLabel(state.cwd) : "workspace";
+  const context = state.activeInspectorThreadId ? state.threadContexts.get(state.activeInspectorThreadId) : null;
+  const touched = state.activeInspectorThreadId
+    ? state.threadTouchedFiles.get(state.activeInspectorThreadId) || rebuildThreadTouchedFiles(state.activeInspectorThreadId)
+    : new Map();
+
+  if (state.inspectorTab === "working-set") {
+    if (context) {
+      elements.inspectorContext.textContent = `${context.titleElement.textContent} · ${pluralize(touched.size, "touched file")}.`;
+    } else {
+      elements.inspectorContext.textContent = "No active thread yet.";
+    }
+    return;
+  }
+
+  if (context && touched.size > 0) {
+    elements.inspectorContext.textContent = `Browsing ${workspaceLabel}. ${pluralize(touched.size, "touched file")} from ${context.titleElement.textContent}.`;
+    return;
+  }
+
+  elements.inspectorContext.textContent = `Browse ${workspaceLabel}, inspect files, and jump into diffs.`;
+}
+
+function setInspectorTab(tabId) {
+  const nextTab = INSPECTOR_TABS.some((tab) => tab.id === tabId) ? tabId : "browser";
+  state.inspectorTab = nextTab;
+  renderInspectorTabs();
+  renderInspectorContext();
+}
+
+function setActiveInspectorThread(threadId) {
+  const nextThreadId = threadId && state.threadContexts.has(threadId) ? threadId : null;
+  state.activeInspectorThreadId = nextThreadId;
+
+  for (const [candidateId, context] of state.threadContexts.entries()) {
+    const isActive = candidateId === nextThreadId;
+    context.section.classList.toggle("is-active", isActive);
+    context.header.classList.toggle("is-active", isActive);
+    context.header.setAttribute("aria-pressed", String(isActive));
+  }
+
+  if (nextThreadId) {
+    rebuildThreadTouchedFiles(nextThreadId);
+  }
+
+  renderWorkingSet();
+  renderInspectorContext();
+}
+
+function findWorkspaceEntry(relativePath) {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  const parentPath = parentWorkspacePath(normalized);
+  const candidates = state.workspaceTreeEntries.get(parentPath) || [];
+  return candidates.find((entry) => entry.path === normalized) || null;
+}
+
+function setBrowserPreviewState(preview) {
+  state.browserPreview = preview;
+  renderFilePreview();
+}
+
+function renderFilePreview() {
+  elements.filePreview.textContent = "";
+
+  const selectedPath = normalizeWorkspaceRelativePath(state.selectedBrowserPath);
+  elements.openSelectedFileButton.disabled = !selectedPath;
+
+  if (state.browserPreviewLoading) {
+    createEmptyState(elements.filePreview, "Loading preview...");
+    return;
+  }
+
+  if (!selectedPath) {
+    createEmptyState(elements.filePreview, "Select a file in the tree or from the timeline to preview it here.");
+    return;
+  }
+
+  if (!state.browserPreview) {
+    createEmptyState(elements.filePreview, "Select a file in the tree or from the timeline to preview it here.");
+    return;
+  }
+
+  clearEmptyState(elements.filePreview);
+
+  const header = document.createElement("div");
+  header.className = "file-preview-header";
+
+  const title = document.createElement("strong");
+  title.textContent = state.browserPreview.path || selectedPath;
+
+  const meta = document.createElement("span");
+  if (state.browserPreview.error) {
+    meta.textContent = "Preview unavailable";
+  } else if (state.browserPreview.message) {
+    meta.textContent = "Selection";
+  } else {
+    const details = [];
+    if (typeof state.browserPreview.size === "number") {
+      details.push(`${state.browserPreview.size.toLocaleString()} bytes`);
+    }
+    if (state.browserPreview.truncated) {
+      details.push("truncated");
+    }
+    if (state.browserPreview.isBinary) {
+      details.push("binary");
+    }
+    meta.textContent = details.join(" · ") || "Preview";
+  }
+
+  header.append(title, meta);
+  elements.filePreview.append(header);
+
+  if (state.browserPreview.error || state.browserPreview.message) {
+    const notice = document.createElement("div");
+    notice.className = state.browserPreview.error ? "file-preview-note is-error" : "file-preview-note";
+    notice.textContent = state.browserPreview.error || state.browserPreview.message;
+    elements.filePreview.append(notice);
+    return;
+  }
+
+  if (state.browserPreview.isBinary) {
+    const binaryNotice = document.createElement("div");
+    binaryNotice.className = "file-preview-note";
+    binaryNotice.textContent = "This file looks binary, so the inline preview is hidden.";
+    elements.filePreview.append(binaryNotice);
+    return;
+  }
+
+  const body = document.createElement("pre");
+  body.className = "file-preview-body";
+  body.textContent = state.browserPreview.content || "";
+  elements.filePreview.append(body);
+}
+
+async function loadWorkspaceDirectory(relativePath = "") {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  if (!desktopApi || !state.cwd) {
+    return [];
+  }
+
+  if (state.workspaceTreeEntries.has(normalized)) {
+    return state.workspaceTreeEntries.get(normalized) || [];
+  }
+
+  if (state.workspaceTreeLoading.has(normalized)) {
+    return [];
+  }
+
+  state.workspaceTreeLoading.add(normalized);
+  renderWorkspaceTree();
+
+  try {
+    const payload = await desktopApi.listWorkspaceTree(state.cwd, normalized);
+    const entries = Array.isArray(payload?.entries)
+      ? payload.entries.map((entry) => ({
+          ...entry,
+          path: normalizeWorkspaceRelativePath(entry.path),
+        }))
+      : [];
+    state.workspaceTreeEntries.set(normalized, entries);
+    return entries;
+  } catch (error) {
+    setStatus(toErrorMessage(error));
+    return [];
+  } finally {
+    state.workspaceTreeLoading.delete(normalized);
+    renderWorkspaceTree();
+  }
+}
+
+async function ensureWorkspaceTreeLoaded() {
+  return loadWorkspaceDirectory("");
+}
+
+async function revealWorkspacePath(relativePath) {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  await ensureWorkspaceTreeLoaded();
+
+  for (const ancestor of workspaceAncestors(normalized)) {
+    state.expandedWorkspacePaths.add(ancestor);
+    await loadWorkspaceDirectory(ancestor);
+  }
+
+  renderWorkspaceTree();
+}
+
+async function previewWorkspaceFile(relativePath, options = {}) {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  if (!normalized) {
+    return;
+  }
+
+  if (options.expandInspector !== false) {
+    setInspectorCollapsed(false);
+  }
+
+  if (options.switchTab !== false) {
+    setInspectorTab("browser");
+  }
+
+  state.selectedBrowserPath = normalized;
+  await revealWorkspacePath(normalized);
+
+  const entry = findWorkspaceEntry(normalized);
+  if (entry?.type === "directory") {
+    setBrowserPreviewState({
+      path: normalized,
+      message: "Directory selected. Expand folders in the tree to inspect individual files.",
+    });
+    renderWorkspaceTree();
+    return;
+  }
+
+  state.browserPreviewLoading = true;
+  renderFilePreview();
+
+  try {
+    if (!desktopApi) {
+      throw new Error("Desktop IPC bridge is unavailable.");
+    }
+    const preview = await desktopApi.readWorkspaceFile(state.cwd, normalized);
+    setBrowserPreviewState({
+      ...preview,
+      path: normalizeWorkspaceRelativePath(preview.path || normalized) || normalized,
+    });
+  } catch (error) {
+    setBrowserPreviewState({
+      path: normalized,
+      error: toErrorMessage(error),
+    });
+  } finally {
+    state.browserPreviewLoading = false;
+    renderWorkspaceTree();
+    renderFilePreview();
+  }
+}
+
+async function selectWorkspaceTreePath(relativePath) {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  if (!normalized) {
+    return;
+  }
+
+  const entry = findWorkspaceEntry(normalized);
+  if (entry?.type === "directory") {
+    state.selectedBrowserPath = normalized;
+    setBrowserPreviewState({
+      path: normalized,
+      message: "Directory selected. Expand folders in the tree to inspect individual files.",
+    });
+    renderWorkspaceTree();
+    return;
+  }
+
+  await previewWorkspaceFile(normalized);
+}
+
+async function toggleWorkspaceDirectory(relativePath) {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  if (!normalized) {
+    return;
+  }
+
+  if (state.expandedWorkspacePaths.has(normalized)) {
+    state.expandedWorkspacePaths.delete(normalized);
+    renderWorkspaceTree();
+    return;
+  }
+
+  state.expandedWorkspacePaths.add(normalized);
+  await loadWorkspaceDirectory(normalized);
+}
+
+function createWorkspaceTreeNode(entry) {
+  const node = document.createElement("div");
+  node.className = "workspace-tree-node";
+  node.dataset.path = entry.path;
+
+  const row = document.createElement("div");
+  row.className = "workspace-tree-row";
+  if (state.selectedBrowserPath === entry.path) {
+    row.classList.add("is-selected");
+  }
+
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "workspace-tree-toggle";
+
+  if (entry.type === "directory") {
+    const expanded = state.expandedWorkspacePaths.has(entry.path);
+    toggle.textContent = expanded ? "▾" : "▸";
+    toggle.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await toggleWorkspaceDirectory(entry.path);
+    });
+  } else {
+    toggle.classList.add("is-placeholder");
+    toggle.disabled = true;
+    toggle.textContent = "•";
+  }
+
+  const label = document.createElement("button");
+  label.type = "button";
+  label.className = `workspace-tree-label is-${entry.type}`;
+  label.textContent = entry.name;
+  label.title = entry.path;
+  label.addEventListener("click", async () => {
+    await selectWorkspaceTreePath(entry.path);
+  });
+
+  row.append(toggle, label);
+  node.append(row);
+
+  if (entry.type === "directory" && state.expandedWorkspacePaths.has(entry.path)) {
+    const children = document.createElement("div");
+    children.className = "workspace-tree-children";
+
+    if (state.workspaceTreeLoading.has(entry.path)) {
+      const loading = document.createElement("div");
+      loading.className = "workspace-tree-loading";
+      loading.textContent = "Loading...";
+      children.append(loading);
+    } else {
+      const childEntries = state.workspaceTreeEntries.get(entry.path) || [];
+      if (childEntries.length === 0) {
+        const empty = document.createElement("div");
+        empty.className = "workspace-tree-loading";
+        empty.textContent = "Empty folder";
+        children.append(empty);
+      } else {
+        for (const child of childEntries) {
+          children.append(createWorkspaceTreeNode(child));
+        }
+      }
+    }
+
+    node.append(children);
+  }
+
+  return node;
+}
+
+function renderWorkspaceTree() {
+  elements.workspaceTree.textContent = "";
+
+  if (!state.cwd) {
+    createEmptyState(elements.workspaceTree, "Choose a workspace to load the browser.");
+    return;
+  }
+
+  if (state.workspaceTreeLoading.has("") && !state.workspaceTreeEntries.has("")) {
+    createEmptyState(elements.workspaceTree, "Loading workspace tree...");
+    return;
+  }
+
+  const rootEntries = state.workspaceTreeEntries.get("") || [];
+  if (rootEntries.length === 0) {
+    createEmptyState(elements.workspaceTree, "No files available in this workspace browser.");
+    return;
+  }
+
+  clearEmptyState(elements.workspaceTree);
+  const fragment = document.createDocumentFragment();
+  for (const entry of rootEntries) {
+    fragment.append(createWorkspaceTreeNode(entry));
+  }
+  elements.workspaceTree.append(fragment);
+}
+
+async function reloadWorkspaceBrowser() {
+  state.workspaceTreeEntries = new Map();
+  state.workspaceTreeLoading = new Set();
+  state.expandedWorkspacePaths = new Set([""]);
+  state.selectedBrowserPath = null;
+  state.browserPreview = null;
+  state.browserPreviewLoading = false;
+  renderWorkspaceTree();
+  renderFilePreview();
+
+  if (!state.cwd || !desktopApi) {
+    return;
+  }
+
+  await ensureWorkspaceTreeLoaded();
+}
+
+async function openWorkspacePath(relativePath) {
+  const normalized = normalizeWorkspaceRelativePath(relativePath);
+  if (!normalized || !desktopApi) {
+    return;
+  }
+
+  const result = await desktopApi.openWorkspacePath(state.cwd, normalized);
+  if (!result?.ok) {
+    setStatus(result?.error || `Could not open ${normalized}.`);
+  }
+}
+
+function createDiffSelection(threadId, entry, preferredPath = null) {
+  const diffInfo = entry.diffInfo || parseUnifiedDiff(entry.diff);
+  const files = Array.isArray(diffInfo.files) ? diffInfo.files : [];
+  const changedPaths = uniqueWorkspacePaths([
+    ...(diffInfo.changedPaths || []),
+    ...((Array.isArray(entry.files) ? entry.files : [])),
+  ]);
+
+  return {
+    threadId,
+    entryId: entry.id,
+    title: entry.title,
+    label: entry.label,
+    meta: entry.meta,
+    statusLabel: entry.statusLabel,
+    raw: entry.diff || "",
+    files,
+    changedPaths,
+    preferredPath: normalizeWorkspaceRelativePath(preferredPath) || changedPaths[0] || files[0]?.path || null,
+  };
+}
+
+function setActiveDiff(selection) {
+  state.activeDiff = selection || null;
+  state.activeDiffFilePath = selection?.preferredPath || null;
+  renderDiffInspector();
+}
+
+function createDiffFileHeader(file) {
+  const header = document.createElement("div");
+  header.className = "diff-file-header";
+
+  const title = document.createElement("strong");
+  title.textContent = file.path || file.newPath || file.oldPath || "Diff";
+
+  const meta = document.createElement("span");
+  meta.textContent = file.status;
+
+  header.append(title, meta);
+  return header;
+}
+
+function createDiffLineNode(line) {
+  const element = document.createElement("div");
+  element.className = "diff-line";
+
+  if (line.startsWith("+")) {
+    element.classList.add("is-add");
+  } else if (line.startsWith("-")) {
+    element.classList.add("is-remove");
+  } else if (line.startsWith("@@")) {
+    element.classList.add("is-hunk");
+  } else if (line.startsWith("diff --git") || line.startsWith("index ") || line.startsWith("--- ") || line.startsWith("+++ ")) {
+    element.classList.add("is-meta");
+  }
+
+  element.textContent = line;
+  return element;
+}
+
+function renderUnifiedDiffFile(file) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "diff-render-block";
+  wrapper.append(createDiffFileHeader(file));
+
+  const body = document.createElement("div");
+  body.className = "diff-unified-view";
+  for (const line of file.rawLines) {
+    body.append(createDiffLineNode(line));
+  }
+
+  wrapper.append(body);
+  return wrapper;
+}
+
+function renderSplitDiffFile(file) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "diff-render-block";
+  wrapper.append(createDiffFileHeader(file));
+
+  if (file.headerLines.length > 0) {
+    const meta = document.createElement("pre");
+    meta.className = "diff-file-meta";
+    meta.textContent = file.headerLines.join("\n");
+    wrapper.append(meta);
+  }
+
+  const grid = document.createElement("div");
+  grid.className = "diff-split-grid";
+
+  const headerRow = document.createElement("div");
+  headerRow.className = "diff-split-header";
+  headerRow.innerHTML = "<span>Before</span><span>After</span>";
+  grid.append(headerRow);
+
+  const rows = buildSplitDiffRows(file);
+  for (const row of rows) {
+    if (row.type === "hunk" || row.type === "note") {
+      const note = document.createElement("div");
+      note.className = `diff-split-row is-spanning ${row.type === "hunk" ? "is-hunk" : "is-note"}`;
+      note.textContent = row.text;
+      grid.append(note);
+      continue;
+    }
+
+    const rowElement = document.createElement("div");
+    rowElement.className = "diff-split-row";
+
+    const left = document.createElement("pre");
+    left.className = `diff-split-cell is-${row.leftTone}`;
+    left.textContent = row.left;
+
+    const right = document.createElement("pre");
+    right.className = `diff-split-cell is-${row.rightTone}`;
+    right.textContent = row.right;
+
+    rowElement.append(left, right);
+    grid.append(rowElement);
+  }
+
+  wrapper.append(grid);
+  return wrapper;
+}
+
+function renderDiffInspector() {
+  elements.diffUnifiedButton.classList.toggle("is-active", state.diffViewMode === "unified");
+  elements.diffSplitButton.classList.toggle("is-active", state.diffViewMode === "split");
+
+  const selection = state.activeDiff;
+  if (!selection || !selection.raw) {
+    elements.diffInspectorEmpty.classList.remove("hidden");
+    elements.diffInspectorSurface.classList.add("hidden");
+    elements.diffInspectorMeta.textContent = "Select an edit, approval, or file chip to inspect.";
+    elements.diffPreviewFileButton.disabled = true;
+    elements.diffOpenFileButton.disabled = true;
+    return;
+  }
+
+  elements.diffInspectorEmpty.classList.add("hidden");
+  elements.diffInspectorSurface.classList.remove("hidden");
+
+  const fileCount = selection.files.length || selection.changedPaths.length;
+  elements.diffInspectorMeta.textContent = [selection.title, selection.statusLabel, fileCount ? pluralize(fileCount, "file") : ""]
+    .filter(Boolean)
+    .join(" · ");
+
+  elements.diffFileTabs.textContent = "";
+  if (selection.files.length > 0) {
+    const availablePaths = selection.files.map((file) => file.path || file.newPath || file.oldPath).filter(Boolean);
+    if (!availablePaths.includes(state.activeDiffFilePath)) {
+      state.activeDiffFilePath = availablePaths[0] || null;
+    }
+
+    for (const file of selection.files) {
+      const path = file.path || file.newPath || file.oldPath;
+      const tab = document.createElement("button");
+      tab.type = "button";
+      tab.className = "ghost-button diff-file-tab";
+      tab.textContent = lastPathSegment(path);
+      tab.title = path;
+      tab.classList.toggle("is-active", state.activeDiffFilePath === path);
+      tab.addEventListener("click", () => {
+        state.activeDiffFilePath = path;
+        renderDiffInspector();
+      });
+      elements.diffFileTabs.append(tab);
+    }
+  }
+
+  elements.diffPreviewFileButton.disabled = !state.activeDiffFilePath;
+  elements.diffOpenFileButton.disabled = !state.activeDiffFilePath;
+  elements.diffInspectorContent.textContent = "";
+
+  const activeFile =
+    selection.files.find((file) => (file.path || file.newPath || file.oldPath) === state.activeDiffFilePath) ||
+    selection.files[0] ||
+    null;
+
+  if (!activeFile) {
+    const raw = document.createElement("pre");
+    raw.className = "diff-raw-fallback";
+    raw.textContent = selection.raw;
+    elements.diffInspectorContent.append(raw);
+    return;
+  }
+
+  elements.diffInspectorContent.append(
+    state.diffViewMode === "split" ? renderSplitDiffFile(activeFile) : renderUnifiedDiffFile(activeFile),
+  );
+}
+
+function renderWorkingSet() {
+  elements.workingSetList.textContent = "";
+
+  if (!state.activeInspectorThreadId) {
+    elements.workingSetSummary.textContent = "Choose a thread to follow its working set.";
+    createEmptyState(elements.workingSetList, "No active thread yet.");
+    return;
+  }
+
+  const touched = state.threadTouchedFiles.get(state.activeInspectorThreadId) || rebuildThreadTouchedFiles(state.activeInspectorThreadId);
+  const items = [...touched.values()].sort((left, right) => right.order - left.order || left.path.localeCompare(right.path));
+  const threadContext = state.threadContexts.get(state.activeInspectorThreadId);
+  elements.workingSetSummary.textContent = threadContext
+    ? `${threadContext.titleElement.textContent} · ${pluralize(items.length, "touched file")}`
+    : `${pluralize(items.length, "touched file")}`;
+
+  if (items.length === 0) {
+    createEmptyState(elements.workingSetList, "Files touched in this run will appear here.");
+    return;
+  }
+
+  clearEmptyState(elements.workingSetList);
+
+  for (const item of items) {
+    const card = document.createElement("article");
+    card.className = "working-set-item";
+
+    const pathButton = document.createElement("button");
+    pathButton.type = "button";
+    pathButton.className = "working-set-path";
+    pathButton.textContent = item.path;
+    pathButton.title = item.path;
+    pathButton.addEventListener("click", async () => {
+      await previewWorkspaceFile(item.path);
+      setInspectorTab("browser");
+    });
+
+    const meta = document.createElement("div");
+    meta.className = "working-set-meta";
+    meta.textContent = [item.label, item.title, item.count > 1 ? `${item.count} touches` : "", item.meta].filter(Boolean).join(" · ");
+
+    const actions = document.createElement("div");
+    actions.className = "working-set-actions";
+
+    const previewButton = document.createElement("button");
+    previewButton.type = "button";
+    previewButton.className = "ghost-button";
+    previewButton.textContent = "Preview";
+    previewButton.addEventListener("click", async () => {
+      await previewWorkspaceFile(item.path);
+      setInspectorTab("browser");
+    });
+    actions.append(previewButton);
+
+    if (item.diffEntry) {
+      const diffButton = document.createElement("button");
+      diffButton.type = "button";
+      diffButton.className = "ghost-button";
+      diffButton.textContent = "Inspect Diff";
+      diffButton.addEventListener("click", () => {
+        setInspectorCollapsed(false);
+        setActiveDiff(createDiffSelection(state.activeInspectorThreadId, item.diffEntry, item.path));
+      });
+      actions.append(diffButton);
+    }
+
+    card.append(pathButton, meta, actions);
+    elements.workingSetList.append(card);
+  }
+}
+
+async function handleEntryFileChipClick(threadId, entry, filePath) {
+  if (threadId) {
+    setActiveInspectorThread(threadId);
+  }
+
+  setInspectorCollapsed(false);
+
+  const normalized = normalizeWorkspaceRelativePath(filePath);
+  if (!normalized) {
+    return;
+  }
+
+  if (entry.diff && entry.diffInfo?.changedPaths?.includes(normalized)) {
+    setActiveDiff(createDiffSelection(threadId, entry, normalized));
+  }
+
+  await previewWorkspaceFile(normalized);
 }
 
 function findBestDebugThreadId() {
@@ -843,6 +1975,19 @@ function createThreadContext({ threadId, title, subtitle, status, statusTone }) 
 
   const header = document.createElement("div");
   header.className = "thread-header";
+  header.tabIndex = 0;
+  header.setAttribute("role", "button");
+  header.setAttribute("aria-pressed", "false");
+  header.addEventListener("click", () => {
+    setActiveInspectorThread(threadId);
+  });
+  header.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+    event.preventDefault();
+    setActiveInspectorThread(threadId);
+  });
 
   const titleGroup = document.createElement("div");
   titleGroup.className = "thread-title-group";
@@ -874,6 +2019,7 @@ function createThreadContext({ threadId, title, subtitle, status, statusTone }) 
   const context = {
     threadId,
     section,
+    header,
     body,
     titleElement,
     metaElement,
@@ -881,6 +2027,7 @@ function createThreadContext({ threadId, title, subtitle, status, statusTone }) 
   };
 
   state.threadContexts.set(threadId, context);
+  setActiveInspectorThread(threadId);
   elements.transcript.scrollTop = elements.transcript.scrollHeight;
   return context;
 }
@@ -918,6 +2065,11 @@ function updateThreadContext(threadId, patch) {
   context.statusElement.className = "thread-status";
   if (patch.statusTone) {
     context.statusElement.classList.add(patch.statusTone);
+  }
+
+  if (state.activeInspectorThreadId === threadId) {
+    renderInspectorContext();
+    renderWorkingSet();
   }
 }
 
@@ -1139,7 +2291,7 @@ function buildDisclosure(label, className, text, open = false) {
   return disclosure;
 }
 
-function createTimelineEntryElement(entry) {
+function createTimelineEntryElement(threadId, entry) {
   const card = document.createElement("article");
   card.className = "panel-entry";
   decorateTimelineEntry(card, entry.category);
@@ -1204,6 +2356,25 @@ function createTimelineEntryElement(entry) {
     card.append(summary);
   }
 
+  if (Array.isArray(entry.files) && entry.files.length > 0) {
+    const files = document.createElement("div");
+    files.className = "panel-entry-files";
+
+    for (const filePath of entry.files) {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "panel-entry-file-chip";
+      chip.textContent = filePath;
+      chip.title = filePath;
+      chip.addEventListener("click", async () => {
+        await handleEntryFileChipClick(threadId, entry, filePath);
+      });
+      files.append(chip);
+    }
+
+    card.append(files);
+  }
+
   if (entry.detail) {
     card.append(buildDisclosure("Raw output", "panel-entry-detail", entry.detail, entry.status === "failed"));
   }
@@ -1214,6 +2385,23 @@ function createTimelineEntryElement(entry) {
 
   if (entry.requestText) {
     card.append(buildDisclosure("Request details", "panel-entry-detail", entry.requestText, true));
+  }
+
+  if (entry.diff) {
+    const actions = document.createElement("div");
+    actions.className = "timeline-entry-actions";
+
+    const inspectDiffButton = document.createElement("button");
+    inspectDiffButton.type = "button";
+    inspectDiffButton.className = "ghost-button";
+    inspectDiffButton.textContent = "Inspect Diff";
+    inspectDiffButton.addEventListener("click", () => {
+      setInspectorCollapsed(false);
+      setActiveDiff(createDiffSelection(threadId, entry, entry.files?.[0] || null));
+    });
+
+    actions.append(inspectDiffButton);
+    card.append(actions);
   }
 
   if (typeof entry.renderActions === "function") {
@@ -1233,9 +2421,19 @@ function appendTimelineEntry(threadId, entry) {
     subtitle: "Session thread",
     status: "Loaded",
   });
-  const element = createTimelineEntryElement(entry);
+  const element = createTimelineEntryElement(threadId, entry);
   context.body.append(element);
   state.activityEntryMap.set(activityEntryKey(threadId, entry.id), { entry, element });
+  rebuildThreadTouchedFiles(threadId);
+  if (!state.activeInspectorThreadId || state.activeInspectorThreadId === threadId) {
+    setActiveInspectorThread(threadId);
+  }
+  if (entry.diff && (!state.activeDiff || (state.running && state.activeInspectorThreadId === threadId))) {
+    setActiveDiff(createDiffSelection(threadId, entry, entry.files?.[0] || null));
+  } else {
+    renderWorkingSet();
+    renderInspectorContext();
+  }
   applyActivityFilters();
   elements.transcript.scrollTop = elements.transcript.scrollHeight;
   return element;
@@ -1252,9 +2450,19 @@ function upsertTimelineEntry(threadId, nextEntry) {
     ...existing.entry,
     ...nextEntry,
   };
-  const nextElement = createTimelineEntryElement(merged);
+  const nextElement = createTimelineEntryElement(threadId, merged);
   existing.element.replaceWith(nextElement);
   state.activityEntryMap.set(key, { entry: merged, element: nextElement });
+  rebuildThreadTouchedFiles(threadId);
+  if (!state.activeInspectorThreadId || state.activeInspectorThreadId === threadId) {
+    setActiveInspectorThread(threadId);
+  }
+  if (merged.diff && (!state.activeDiff || state.activeDiff.entryId === merged.id || (state.running && state.activeInspectorThreadId === threadId))) {
+    setActiveDiff(createDiffSelection(threadId, merged, merged.files?.[0] || null));
+  } else {
+    renderWorkingSet();
+    renderInspectorContext();
+  }
   applyActivityFilters();
   elements.transcript.scrollTop = elements.transcript.scrollHeight;
   return nextElement;
@@ -1524,6 +2732,8 @@ function createFinishedToolEntry(payload) {
   }
 
   const diff = typeof result?.metadata?.diff === "string" ? result.metadata.diff : "";
+  const diffInfo = parseUnifiedDiff(diff);
+  const files = collectToolResultFiles(toolCall, result, diffInfo);
 
   return {
     id: toolCall.callId,
@@ -1538,6 +2748,8 @@ function createFinishedToolEntry(payload) {
       : summarizeNonCommandTool(toolCall.name, result, payload.summary),
     detail: detailParts.filter(Boolean).join("\n\n"),
     diff,
+    diffInfo,
+    files,
   };
 }
 
@@ -1584,6 +2796,8 @@ async function respondToApproval(approval, approved) {
 
 function createApprovalTimelineEntry(approval, resolution = "pending") {
   const { requestText, diffText } = splitApprovalSummary(approval.summary);
+  const diffInfo = parseUnifiedDiff(diffText);
+  const files = collectApprovalFiles(approval, diffInfo);
   const status = resolution === "approved" ? "completed" : resolution === "denied" ? "failed" : "pending";
   const statusLabel = resolution === "approved" ? "Approved" : resolution === "denied" ? "Denied" : "Needs Review";
 
@@ -1602,6 +2816,8 @@ function createApprovalTimelineEntry(approval, resolution = "pending") {
         : `${approval.toolName} was denied.`,
     requestText,
     diff: diffText,
+    diffInfo,
+    files,
     approval: true,
     renderActions: resolution !== "pending"
       ? null
@@ -1792,10 +3008,17 @@ function resetTranscriptView() {
   state.assistantStates = new Map();
   state.runThreadMap = new Map();
   state.activityEntryMap = new Map();
+  state.threadTouchedFiles = new Map();
   state.workspaceThreadId = null;
   state.pendingThreadId = null;
   state.currentRunId = null;
+  state.activeInspectorThreadId = null;
+  state.activeDiff = null;
+  state.activeDiffFilePath = null;
   state.nextThreadIndex = 1;
+  renderWorkingSet();
+  renderInspectorContext();
+  renderDiffInspector();
 }
 
 function renderSessionTranscript(events) {
@@ -1804,6 +3027,7 @@ function renderSessionTranscript(events) {
   let currentThreadId = null;
   let currentRunId = null;
   let threadIndex = 0;
+  const callInputs = new Map();
 
   for (const event of events) {
     const shouldStartNewThread =
@@ -1838,40 +3062,28 @@ function renderSessionTranscript(events) {
     }
 
     if (event.type === "tool_call") {
+      callInputs.set(event.callId, event.input || {});
       sealAssistantSegment(currentThreadId);
-      upsertTimelineEntry(currentThreadId, {
-        id: event.callId,
-        category: COMMAND_TOOL_NAMES.has(event.toolName) ? "commands" : "tools",
-        label: COMMAND_TOOL_NAMES.has(event.toolName) ? "Command" : "Tool",
-        title: event.toolName,
-        meta: `Started ${formatTime(event.timestamp)}`,
-        status: "pending",
-        statusLabel: "Pending",
-        summary: summarizePendingTool(event.toolName, event.input || {}),
-        detail: "",
-        diff: "",
-      });
+      upsertTimelineEntry(currentThreadId, createPendingToolEntry({
+        toolCall: {
+          callId: event.callId,
+          name: event.toolName,
+          arguments: event.input || {},
+        },
+      }));
       continue;
     }
 
     if (event.type === "tool_result") {
       sealAssistantSegment(currentThreadId);
-      const diff = typeof event.result?.metadata?.diff === "string" ? event.result.metadata.diff : "";
-      const entry = {
-        id: event.callId,
-        title: event.toolName,
-        meta: `Completed ${formatTime(event.timestamp)}`,
-        status: isInformationalToolResult(event.result) ? "info" : event.result.ok ? "completed" : "failed",
-        statusLabel: isInformationalToolResult(event.result) ? "Info" : event.result.ok ? "Completed" : "Failed",
-        summary: COMMAND_TOOL_NAMES.has(event.toolName)
-          ? event.result.ok ? "completed" : event.result.error.message
-          : summarizeNonCommandTool(event.toolName, event.result, event.result.ok ? "" : event.result.error.message),
-        detail: typeof event.result.content === "string" ? truncateText(event.result.content, 900) : "",
-        diff,
-        category: COMMAND_TOOL_NAMES.has(event.toolName) ? "commands" : "tools",
-        label: COMMAND_TOOL_NAMES.has(event.toolName) ? "Command" : "Tool",
-      };
-      upsertTimelineEntry(currentThreadId, entry);
+      upsertTimelineEntry(currentThreadId, createFinishedToolEntry({
+        toolCall: {
+          callId: event.callId,
+          name: event.toolName,
+          arguments: callInputs.get(event.callId) || {},
+        },
+        result: event.result,
+      }));
     }
   }
 
@@ -2080,6 +3292,7 @@ async function bootstrap() {
         subtitle: formatWorkspaceLabel(payload.cwd),
       });
     }
+    await reloadWorkspaceBrowser();
     resetProgress();
     setStatus(payload.hasApiKey ? "Ready for the next message." : "MODEL_ACCESS_KEY is not set.");
     appendDebug(`bootstrap:ready cwd=${payload.cwd} hasApiKey=${String(payload.hasApiKey)}`);
@@ -2099,6 +3312,7 @@ async function reloadWorkspaceState() {
     applyConfigToUi(payload.cwd, payload.config, payload.sessions, payload.modelOptions);
     resetTranscriptView();
     ensureWorkspaceThread();
+    await reloadWorkspaceBrowser();
     resetProgress();
     setStatus(payload.hasApiKey ? "Workspace ready." : "MODEL_ACCESS_KEY is not set.");
   } catch (error) {
@@ -2481,6 +3695,10 @@ elements.progressToggle.addEventListener("click", () => {
   toggleRunDetails();
 });
 
+elements.inspectorToggleButton.addEventListener("click", () => {
+  setInspectorCollapsed(!state.inspectorCollapsed);
+});
+
 elements.topbarCollapseButton.addEventListener("click", () => {
   setTopbarCollapsed(true);
 });
@@ -2497,6 +3715,40 @@ elements.topbarQuickCloseButton.addEventListener("click", () => {
 elements.refreshSessionsButton.addEventListener("click", async () => {
   await reloadWorkspaceState();
   setStatus("Workspace state refreshed.");
+});
+
+elements.reloadWorkspaceTreeButton.addEventListener("click", async () => {
+  await reloadWorkspaceBrowser();
+  setStatus("Workspace tree refreshed.");
+});
+
+elements.openSelectedFileButton.addEventListener("click", async () => {
+  await openWorkspacePath(state.selectedBrowserPath);
+});
+
+elements.diffUnifiedButton.addEventListener("click", () => {
+  state.diffViewMode = "unified";
+  renderDiffInspector();
+});
+
+elements.diffSplitButton.addEventListener("click", () => {
+  state.diffViewMode = "split";
+  renderDiffInspector();
+});
+
+elements.diffPreviewFileButton.addEventListener("click", async () => {
+  if (!state.activeDiffFilePath) {
+    return;
+  }
+  await previewWorkspaceFile(state.activeDiffFilePath);
+  setInspectorTab("browser");
+});
+
+elements.diffOpenFileButton.addEventListener("click", async () => {
+  if (!state.activeDiffFilePath) {
+    return;
+  }
+  await openWorkspacePath(state.activeDiffFilePath);
 });
 
 elements.saveConfigButton.addEventListener("click", async () => {
@@ -2576,10 +3828,16 @@ ensureWorkspaceThread();
 resetProgress();
 renderPresetButtons();
 renderActivityFilters();
+renderInspectorTabs();
+renderWorkspaceTree();
+renderFilePreview();
+renderWorkingSet();
+renderDiffInspector();
 setPreset(state.preset);
 syncTopbarState();
 loadRunDetailsPreference();
 loadTopbarPreference();
+loadInspectorPreference();
 appendDebug(`desktopApi:${desktopApi ? "available" : "missing"}`);
 bootstrap();
 window.addEventListener("resize", () => {

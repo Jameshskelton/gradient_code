@@ -78,9 +78,37 @@ type RunProgressState = {
   activeToolName?: string;
 };
 
+type WorkspaceTreeEntry = {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  hasChildren: boolean;
+};
+
+type WorkspaceFilePreviewPayload = {
+  path: string;
+  absolutePath: string;
+  content: string;
+  isBinary: boolean;
+  truncated: boolean;
+  size: number;
+};
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const appIconPath = path.resolve(__dirname, "../../../logo.png");
+const MAX_FILE_PREVIEW_BYTES = 200_000;
+const IGNORED_BROWSER_DIRS = new Set([
+  ".git",
+  "node_modules",
+  ".gradient-code",
+  "dist",
+  "build",
+  "coverage",
+  ".next",
+  ".turbo",
+]);
+const IGNORED_BROWSER_FILES = new Set([".DS_Store"]);
 let mainWindow: BrowserWindow | null = null;
 let activeRun = false;
 let activeRunAbortController: AbortController | null = null;
@@ -216,6 +244,92 @@ function countExistingThreads(state: AgentSessionState | null): number {
 
 function makeRunId(): string {
   return `run-${new Date().toISOString().replaceAll(":", "-")}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizePathSlashes(value: string): string {
+  return value.replace(/\\/g, "/");
+}
+
+function isWithinWorkspace(root: string, targetPath: string): boolean {
+  const resolvedRoot = path.resolve(root);
+  const resolvedTarget = path.resolve(targetPath);
+  return resolvedTarget === resolvedRoot || resolvedTarget.startsWith(`${resolvedRoot}${path.sep}`);
+}
+
+function resolveWorkspacePath(root: string, relativePath = ""): string {
+  const resolved = path.resolve(root, relativePath || ".");
+  if (!isWithinWorkspace(root, resolved)) {
+    throw new Error(`Path escapes workspace: ${relativePath}`);
+  }
+  return resolved;
+}
+
+function relativeWorkspacePath(root: string, targetPath: string): string {
+  const relative = normalizePathSlashes(path.relative(root, targetPath));
+  return relative === "" ? "" : relative;
+}
+
+function shouldIgnoreBrowserEntry(name: string, isDirectory: boolean): boolean {
+  return isDirectory ? IGNORED_BROWSER_DIRS.has(name) : IGNORED_BROWSER_FILES.has(name);
+}
+
+async function listWorkspaceDirectory(cwd: string, relativePath = ""): Promise<{ path: string; entries: WorkspaceTreeEntry[] }> {
+  const resolvedCwd = path.resolve(cwd);
+  const targetPath = resolveWorkspacePath(resolvedCwd, relativePath);
+  const dirents = await fs.readdir(targetPath, { withFileTypes: true });
+
+  const entries = dirents
+    .filter((entry) => !shouldIgnoreBrowserEntry(entry.name, entry.isDirectory()))
+    .filter((entry) => entry.isDirectory() || entry.isFile())
+    .sort((left, right) => {
+      if (left.isDirectory() !== right.isDirectory()) {
+        return left.isDirectory() ? -1 : 1;
+      }
+      return left.name.localeCompare(right.name);
+    })
+    .map((entry) => {
+      const absolutePath = path.join(targetPath, entry.name);
+      return {
+        name: entry.name,
+        path: relativeWorkspacePath(resolvedCwd, absolutePath),
+        type: entry.isDirectory() ? "directory" : "file",
+        hasChildren: entry.isDirectory(),
+      } satisfies WorkspaceTreeEntry;
+    });
+
+  return {
+    path: relativeWorkspacePath(resolvedCwd, targetPath),
+    entries,
+  };
+}
+
+async function readWorkspaceFilePreview(cwd: string, relativePath: string): Promise<WorkspaceFilePreviewPayload> {
+  const resolvedCwd = path.resolve(cwd);
+  const targetPath = resolveWorkspacePath(resolvedCwd, relativePath);
+  const stats = await fs.stat(targetPath);
+  if (!stats.isFile()) {
+    throw new Error(`Not a file: ${relativePath}`);
+  }
+
+  const handle = await fs.open(targetPath, "r");
+  try {
+    const bytesToRead = Math.min(stats.size, MAX_FILE_PREVIEW_BYTES);
+    const buffer = Buffer.alloc(bytesToRead);
+    const { bytesRead } = await handle.read(buffer, 0, bytesToRead, 0);
+    const preview = buffer.subarray(0, bytesRead);
+    const isBinary = preview.includes(0);
+
+    return {
+      path: relativeWorkspacePath(resolvedCwd, targetPath),
+      absolutePath: targetPath,
+      content: isBinary ? "" : preview.toString("utf8"),
+      isBinary,
+      truncated: stats.size > MAX_FILE_PREVIEW_BYTES,
+      size: stats.size,
+    };
+  } finally {
+    await handle.close();
+  }
 }
 
 function emitRunProgress(progress: RunProgressState): void {
@@ -358,6 +472,23 @@ ipcMain.handle("desktop:delete-session", async (_event, cwd: string, sessionId: 
 
 ipcMain.handle("desktop:save-config", async (_event, cwd: string, config: GradientCodeConfig) => {
   return saveGradientCodeConfig(path.resolve(cwd), config);
+});
+
+ipcMain.handle("desktop:list-workspace-tree", async (_event, cwd: string, relativePath: string | undefined) => {
+  return listWorkspaceDirectory(path.resolve(cwd), relativePath ?? "");
+});
+
+ipcMain.handle("desktop:read-workspace-file", async (_event, cwd: string, relativePath: string) => {
+  return readWorkspaceFilePreview(path.resolve(cwd), relativePath);
+});
+
+ipcMain.handle("desktop:open-workspace-path", async (_event, cwd: string, relativePath: string) => {
+  const absolutePath = resolveWorkspacePath(path.resolve(cwd), relativePath);
+  const error = await shell.openPath(absolutePath);
+  return {
+    ok: error === "",
+    error: error || null,
+  };
 });
 
 ipcMain.handle("desktop:respond-approval", async (_event, requestId: string, approved: boolean) => {

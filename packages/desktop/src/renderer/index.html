@@ -6,7 +6,7 @@
     <title>Gradient Code</title>
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body>
+  <body class="detail-pane-collapsed">
     <div class="app-shell">
       <aside class="sidebar">
         <div class="brand-block">
@@ -107,7 +107,12 @@
               <p class="timeline-kicker">Run Timeline</p>
               <p class="timeline-subtle">One chronological rail for conversation, tools, commands, and debug.</p>
             </div>
-            <div id="activityFilters" class="activity-filters" aria-label="Timeline filters"></div>
+            <div class="timeline-toolbar-actions">
+              <div id="activityFilters" class="activity-filters" aria-label="Timeline filters"></div>
+              <button id="inspectorToggleButton" type="button" class="ghost-button inspector-toggle-button" aria-expanded="false">
+                Show Inspector
+              </button>
+            </div>
           </div>
           <section id="transcript" class="transcript activity-rail"></section>
         </section>
@@ -124,6 +129,54 @@
           </div>
         </section>
       </main>
+
+      <aside class="detail-pane inspector-pane">
+        <section class="panel inspector-browser-panel">
+          <div class="panel-header inspector-panel-header">
+            <div class="panel-heading-group">
+              <h2>Workspace</h2>
+              <p id="inspectorContext" class="panel-subtle">Browse the repo, inspect touched files, and jump into diffs.</p>
+            </div>
+            <div id="inspectorTabs" class="panel-tabs" aria-label="Inspector views"></div>
+          </div>
+          <div class="panel browser-panel-body">
+            <div class="browser-toolbar">
+              <button id="reloadWorkspaceTreeButton" type="button" class="ghost-button">Reload Tree</button>
+              <button id="openSelectedFileButton" type="button" class="ghost-button">Open File</button>
+            </div>
+            <section id="browserView" class="inspector-view">
+              <div id="workspaceTree" class="workspace-tree"></div>
+              <div id="filePreview" class="file-preview"></div>
+            </section>
+            <section id="workingSetView" class="inspector-view hidden">
+              <div id="workingSetSummary" class="panel-subtle"></div>
+              <div id="workingSetList" class="working-set-list"></div>
+            </section>
+          </div>
+        </section>
+
+        <section class="panel diff-inspector-panel">
+          <div class="panel-header inspector-panel-header">
+            <div class="panel-heading-group">
+              <h2>Diff Inspector</h2>
+              <p id="diffInspectorMeta" class="panel-subtle">Select an edit, approval, or file chip to inspect.</p>
+            </div>
+            <div class="diff-mode-toggle" aria-label="Diff display mode">
+              <button id="diffUnifiedButton" type="button" class="ghost-button">Unified</button>
+              <button id="diffSplitButton" type="button" class="ghost-button">Side by Side</button>
+            </div>
+          </div>
+          <div id="diffInspectorEmpty" class="empty-state">No diff selected yet.</div>
+          <div id="diffInspectorSurface" class="diff-inspector-surface hidden">
+            <div id="diffFileTabs" class="diff-file-tabs"></div>
+            <div class="diff-inspector-actions">
+              <button id="diffPreviewFileButton" type="button" class="ghost-button">Preview File</button>
+              <button id="diffOpenFileButton" type="button" class="ghost-button">Open File</button>
+            </div>
+            <div id="diffInspectorContent" class="diff-inspector-content"></div>
+          </div>
+        </section>
+      </aside>
     </div>
     <script>
       window.addEventListener("error", (event) => {
