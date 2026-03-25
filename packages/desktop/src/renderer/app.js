@@ -608,6 +608,75 @@ function renderInlineMarkdown(text) {
   return html;
 }
 
+function splitMarkdownTableRow(line) {
+  const trimmed = String(line || "").trim();
+  if (!trimmed.includes("|")) {
+    return [];
+  }
+
+  let row = trimmed;
+  if (row.startsWith("|")) {
+    row = row.slice(1);
+  }
+  if (row.endsWith("|")) {
+    row = row.slice(0, -1);
+  }
+
+  return row.split("|").map((cell) => cell.trim());
+}
+
+function isMarkdownTableDivider(line) {
+  const cells = splitMarkdownTableRow(line);
+  return cells.length > 0 && cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+}
+
+function getMarkdownTableAlignment(cell) {
+  const trimmed = String(cell || "").trim();
+  if (trimmed.startsWith(":") && trimmed.endsWith(":")) {
+    return "center";
+  }
+  if (trimmed.endsWith(":")) {
+    return "right";
+  }
+  if (trimmed.startsWith(":")) {
+    return "left";
+  }
+  return "";
+}
+
+function renderMarkdownTable(headerLine, dividerLine, rowLines) {
+  const headers = splitMarkdownTableRow(headerLine);
+  const alignments = splitMarkdownTableRow(dividerLine).map((cell) => getMarkdownTableAlignment(cell));
+  const bodyRows = rowLines.map((line) => {
+    const cells = splitMarkdownTableRow(line);
+    while (cells.length < headers.length) {
+      cells.push("");
+    }
+    return cells.slice(0, headers.length);
+  });
+
+  const headHtml = headers
+    .map((cell, index) => {
+      const alignment = alignments[index] ? ` style="text-align:${alignments[index]}"` : "";
+      return `<th${alignment}>${renderInlineMarkdown(cell)}</th>`;
+    })
+    .join("");
+
+  const bodyHtml = bodyRows
+    .map((row) => {
+      const cells = row
+        .map((cell, index) => {
+          const alignment = alignments[index] ? ` style="text-align:${alignments[index]}"` : "";
+          return `<td${alignment}>${renderInlineMarkdown(cell)}</td>`;
+        })
+        .join("");
+      return `<tr>${cells}</tr>`;
+    })
+    .join("");
+
+  return `<div class="markdown-table-wrap"><table><thead><tr>${headHtml}</tr></thead><tbody>${bodyHtml}</tbody></table></div>`;
+}
+
 function renderMarkdown(text) {
   const normalized = String(text || "").replace(/\r\n/g, "\n").trim();
   if (!normalized) {
@@ -650,7 +719,8 @@ function renderMarkdown(text) {
     codeLines = [];
   }
 
-  for (const line of lines) {
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
     const fenceMatch = line.match(/^```([\w-]+)?\s*$/);
     if (fenceMatch) {
       flushParagraph();
@@ -676,6 +746,31 @@ function renderMarkdown(text) {
       const level = headingMatch[1].length;
       html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
       continue;
+    }
+
+    const nextLine = lines[index + 1];
+    if (line.includes("|") && nextLine && isMarkdownTableDivider(nextLine)) {
+      const headerCells = splitMarkdownTableRow(line);
+      const dividerCells = splitMarkdownTableRow(nextLine);
+      if (headerCells.length > 1 && dividerCells.length === headerCells.length) {
+        flushParagraph();
+        flushList();
+
+        const rowLines = [];
+        let rowIndex = index + 2;
+        while (rowIndex < lines.length) {
+          const rowLine = lines[rowIndex];
+          if (!rowLine.trim() || !rowLine.includes("|")) {
+            break;
+          }
+          rowLines.push(rowLine);
+          rowIndex += 1;
+        }
+
+        html.push(renderMarkdownTable(line, nextLine, rowLines));
+        index = rowIndex - 1;
+        continue;
+      }
     }
 
     const unorderedListMatch = line.match(/^\s*[-*]\s+(.*)$/);

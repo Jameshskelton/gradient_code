@@ -787,6 +787,7 @@ button:disabled {
 .bubble-body ul,
 .bubble-body ol,
 .bubble-body pre,
+.bubble-body .markdown-table-wrap,
 .bubble-body blockquote,
 .bubble-body h1,
 .bubble-body h2,
@@ -847,6 +848,52 @@ button:disabled {
   margin-left: 0;
   padding-left: 12px;
   color: var(--muted);
+}
+
+.bubble-body .markdown-table-wrap,
+.panel-entry-summary .markdown-table-wrap {
+  width: 100%;
+  overflow-x: auto;
+  margin: 0 0 12px;
+  border: 1px solid rgba(216, 229, 251, 0.92);
+  border-radius: 16px;
+  background: rgba(248, 251, 255, 0.94);
+}
+
+.bubble-body .markdown-table-wrap:last-child,
+.panel-entry-summary .markdown-table-wrap:last-child {
+  margin-bottom: 0;
+}
+
+.bubble-body table,
+.panel-entry-summary table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 420px;
+}
+
+.bubble-body th,
+.bubble-body td,
+.panel-entry-summary th,
+.panel-entry-summary td {
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(216, 229, 251, 0.92);
+  vertical-align: top;
+  text-align: left;
+}
+
+.bubble-body thead th,
+.panel-entry-summary thead th {
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  background: rgba(0, 128, 255, 0.06);
+}
+
+.bubble-body tbody tr:last-child td,
+.panel-entry-summary tbody tr:last-child td {
+  border-bottom: 0;
 }
 
 .composer {
