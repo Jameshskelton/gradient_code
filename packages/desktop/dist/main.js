@@ -136,6 +136,9 @@ function makeRunId() {
 function normalizePathSlashes(value) {
     return value.replace(/\\/g, "/");
 }
+function historyDir(cwd) {
+    return path.join(cwd, ".gradient-code");
+}
 function isWithinWorkspace(root, targetPath) {
     const resolvedRoot = path.resolve(root);
     const resolvedTarget = path.resolve(targetPath);
@@ -208,6 +211,37 @@ async function readWorkspaceFilePreview(cwd, relativePath) {
     finally {
         await handle.close();
     }
+}
+async function openHistoryFolder(cwd) {
+    const directory = historyDir(path.resolve(cwd));
+    await fs.mkdir(directory, { recursive: true });
+    const error = await shell.openPath(directory);
+    return {
+        ok: error === "",
+        error: error || null,
+        path: directory,
+    };
+}
+async function clearWorkspaceHistory(cwd) {
+    const resolvedCwd = path.resolve(cwd);
+    const directory = historyDir(resolvedCwd);
+    const entries = await fs.readdir(directory, { withFileTypes: true }).catch(() => []);
+    let cleared = false;
+    for (const entry of entries) {
+        if (entry.name === "project-notes.md") {
+            continue;
+        }
+        await fs.rm(path.join(directory, entry.name), { recursive: true, force: true });
+        cleared = true;
+    }
+    const remainingEntries = await fs.readdir(directory).catch(() => []);
+    if (remainingEntries.length === 0) {
+        await fs.rm(directory, { recursive: true, force: true });
+    }
+    return {
+        cleared,
+        sessions: await listSessions(resolvedCwd),
+    };
 }
 function emitRunProgress(progress) {
     sendEvent({
@@ -345,6 +379,12 @@ ipcMain.handle("desktop:open-workspace-path", async (_event, cwd, relativePath) 
         error: error || null,
     };
 });
+ipcMain.handle("desktop:open-history-folder", async (_event, cwd) => {
+    return openHistoryFolder(cwd);
+});
+ipcMain.handle("desktop:clear-workspace-history", async (_event, cwd) => {
+    return clearWorkspaceHistory(cwd);
+});
 ipcMain.handle("desktop:respond-approval", async (_event, requestId, approved) => {
     sendEvent({
         type: "debug-log",
@@ -419,11 +459,13 @@ ipcMain.handle("desktop:start-run", async (_event, payload) => {
             type: "debug-log",
             message: `Resolved config model=${model} retryCount=${retryCount} providerTimeoutMs=${providerTimeoutMs} toolTimeoutMs=${toolTimeoutMs}`,
         });
-        const resumed = payload.sessionId
-            ? await loadSession(cwd, payload.sessionId)
-            : payload.resumeLast
-                ? await loadLatestSession(cwd)
-                : null;
+        const resumed = payload.branchSessionId
+            ? await loadSession(cwd, payload.branchSessionId)
+            : payload.sessionId
+                ? await loadSession(cwd, payload.sessionId)
+                : payload.resumeLast
+                    ? await loadLatestSession(cwd)
+                    : null;
         const threadIndex = countExistingThreads(resumed) + 1;
         progress = {
             runId,
@@ -483,7 +525,7 @@ ipcMain.handle("desktop:start-run", async (_event, payload) => {
             maxTurns,
             initialMessages: resumed?.messages,
             initialEvents: resumed?.events,
-            sessionId: resumed?.id,
+            sessionId: payload.branchSessionId ? undefined : resumed?.id,
             toolTimeoutMs,
             providerTimeoutMs,
             preset,
@@ -541,7 +583,7 @@ ipcMain.handle("desktop:start-run", async (_event, payload) => {
             type: "debug-log",
             message: `runAgent resolved sessionId=${result.sessionId} finalTextLength=${result.finalText.length}`,
         });
-        const createdAt = resumed?.createdAt ?? new Date().toISOString();
+        const createdAt = payload.branchSessionId ? new Date().toISOString() : resumed?.createdAt ?? new Date().toISOString();
         const sessionState = {
             id: result.sessionId,
             cwd,
@@ -552,8 +594,8 @@ ipcMain.handle("desktop:start-run", async (_event, payload) => {
             createdAt,
             updatedAt: new Date().toISOString(),
         };
-        const sessionPath = await saveSession(sessionState);
-        const transcriptPath = await writeTranscript(cwd, result.events);
+        const sessionPath = store ? await saveSession(sessionState) : null;
+        const transcriptPath = store ? await writeTranscript(cwd, result.events) : null;
         const sessions = await listSessions(cwd);
         if (progress) {
             progress.phase = "completed";
@@ -564,7 +606,7 @@ ipcMain.handle("desktop:start-run", async (_event, payload) => {
             type: "run-complete",
             runId,
             threadIndex,
-            sessionId: result.sessionId,
+            sessionId: store ? result.sessionId : null,
             sessionPath,
             transcriptPath,
             finalText: result.finalText,

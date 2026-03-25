@@ -24,7 +24,11 @@
         <div class="sidebar-section sidebar-scroll-section">
           <div class="sidebar-header">
             <h2>Sessions</h2>
-            <button id="refreshSessionsButton" class="ghost-button">Refresh</button>
+            <div class="sidebar-header-actions">
+              <button id="openHistoryFolderButton" class="ghost-button">Open History</button>
+              <button id="clearHistoryButton" class="ghost-button">Clear History</button>
+              <button id="refreshSessionsButton" class="ghost-button">Refresh</button>
+            </div>
           </div>
           <div id="sessionList" class="session-list"></div>
         </div>
@@ -49,20 +53,25 @@
                 <label for="maxTurnsInput">Turns</label>
                 <input id="maxTurnsInput" type="number" min="1" value="12" />
               </div>
+            </div>
+            <div class="topbar-actions-cluster">
               <div class="toggle-group">
                 <label><input id="approveAllToggle" type="checkbox" /> Approve All</label>
                 <label><input id="previewWritesToggle" type="checkbox" checked /> Preview Writes</label>
+                <label><input id="storeHistoryToggle" type="checkbox" checked /> Store History</label>
+              </div>
+              <div class="topbar-button-row">
+                <button id="saveConfigButton" class="solid-button">Save Defaults</button>
+                <button id="topbarCollapseButton" type="button" class="topbar-toggle-button" aria-expanded="true">Collapse Controls</button>
               </div>
             </div>
-            <button id="saveConfigButton" class="solid-button">Save Defaults</button>
-            <button id="topbarCollapseButton" type="button" class="topbar-toggle-button" aria-expanded="true">Collapse</button>
           </div>
           <div class="topbar-collapsed-row">
             <div class="topbar-pill">
               <p class="topbar-kicker">Session Controls</p>
             </div>
             <div id="topbarSummary" class="topbar-summary" aria-live="polite"></div>
-            <button id="topbarExpandButton" type="button" class="topbar-toggle-button" aria-expanded="false">Edit</button>
+            <button id="topbarExpandButton" type="button" class="topbar-toggle-button" aria-expanded="false">Edit Controls</button>
           </div>
           <div id="topbarQuickEditor" class="topbar-quick-editor hidden">
             <label id="topbarQuickModelField" class="topbar-quick-field hidden" for="collapsedModelInput">
@@ -154,6 +163,20 @@
             </section>
           </div>
         </section>
+
+        <div
+          id="inspectorResizeHandle"
+          class="inspector-resize-handle"
+          role="separator"
+          aria-label="Resize inspector panels"
+          aria-orientation="horizontal"
+          aria-valuemin="18"
+          aria-valuemax="82"
+          aria-valuenow="52"
+          tabindex="0"
+        >
+          <span class="inspector-resize-grip" aria-hidden="true"></span>
+        </div>
 
         <section class="panel diff-inspector-panel">
           <div class="panel-header inspector-panel-header">

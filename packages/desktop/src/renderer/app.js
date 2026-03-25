@@ -43,6 +43,7 @@ const PRESET_BY_ID = new Map(PRESET_OPTIONS.map((option) => [option.id, option])
 const RUN_DETAILS_COLLAPSED_KEY = "gradient-code:run-details-collapsed";
 const TOPBAR_COLLAPSED_KEY = "gradient-code:topbar-collapsed";
 const INSPECTOR_COLLAPSED_KEY = "gradient-code:inspector-collapsed";
+const INSPECTOR_SPLIT_KEY = "gradient-code:inspector-split";
 const INSPECTOR_TABS = [
   { id: "browser", label: "Browser" },
   { id: "working-set", label: "Working Set" },
@@ -53,6 +54,8 @@ const ACTIVITY_FILTERS = [
   { id: "commands", label: "Commands", activeByDefault: true },
   { id: "debug", label: "Debug", activeByDefault: false },
 ];
+const DEFAULT_INSPECTOR_SPLIT = 0.52;
+const INSPECTOR_MIN_PANEL_HEIGHT = 190;
 
 const state = {
   cwd: "",
@@ -60,6 +63,7 @@ const state = {
   preset: "default",
   modelOptions: [],
   currentSessionId: null,
+  branchSessionId: null,
   running: false,
   approvals: [],
   sessions: [],
@@ -70,6 +74,7 @@ const state = {
   topbarQuickEditor: null,
   inspectorCollapsed: true,
   inspectorCollapsedPreference: true,
+  inspectorSplitRatio: DEFAULT_INSPECTOR_SPLIT,
   inspectorTab: "browser",
   workspaceTreeEntries: new Map(),
   workspaceTreeLoading: new Set(),
@@ -126,6 +131,8 @@ function createDesktopApiFallback() {
       listWorkspaceTree: (cwd, relativePath) => ipcRenderer.invoke("desktop:list-workspace-tree", cwd, relativePath),
       readWorkspaceFile: (cwd, relativePath) => ipcRenderer.invoke("desktop:read-workspace-file", cwd, relativePath),
       openWorkspacePath: (cwd, relativePath) => ipcRenderer.invoke("desktop:open-workspace-path", cwd, relativePath),
+      openHistoryFolder: (cwd) => ipcRenderer.invoke("desktop:open-history-folder", cwd),
+      clearWorkspaceHistory: (cwd) => ipcRenderer.invoke("desktop:clear-workspace-history", cwd),
       listSessions: (cwd) => ipcRenderer.invoke("desktop:list-sessions", cwd),
       loadSession: (cwd, sessionId) => ipcRenderer.invoke("desktop:load-session", cwd, sessionId),
       deleteSession: (cwd, sessionId) => ipcRenderer.invoke("desktop:delete-session", cwd, sessionId),
@@ -155,6 +162,7 @@ const elements = {
   maxTurnsInput: document.getElementById("maxTurnsInput"),
   approveAllToggle: document.getElementById("approveAllToggle"),
   previewWritesToggle: document.getElementById("previewWritesToggle"),
+  storeHistoryToggle: document.getElementById("storeHistoryToggle"),
   saveConfigButton: document.getElementById("saveConfigButton"),
   topbarSummary: document.getElementById("topbarSummary"),
   topbarCollapseButton: document.getElementById("topbarCollapseButton"),
@@ -167,6 +175,8 @@ const elements = {
   topbarQuickCloseButton: document.getElementById("topbarQuickCloseButton"),
   inspectorContext: document.getElementById("inspectorContext"),
   inspectorTabs: document.getElementById("inspectorTabs"),
+  inspectorPane: document.querySelector(".inspector-pane"),
+  inspectorResizeHandle: document.getElementById("inspectorResizeHandle"),
   reloadWorkspaceTreeButton: document.getElementById("reloadWorkspaceTreeButton"),
   openSelectedFileButton: document.getElementById("openSelectedFileButton"),
   browserView: document.getElementById("browserView"),
@@ -202,6 +212,8 @@ const elements = {
   resumeButton: document.getElementById("resumeButton"),
   cancelButton: document.getElementById("cancelButton"),
   sessionList: document.getElementById("sessionList"),
+  openHistoryFolderButton: document.getElementById("openHistoryFolderButton"),
+  clearHistoryButton: document.getElementById("clearHistoryButton"),
   refreshSessionsButton: document.getElementById("refreshSessionsButton"),
 };
 let presetButtons = [];
@@ -286,7 +298,18 @@ function createTopbarSummaryChip(text, options = {}) {
   if (options.active) {
     chip.classList.add("is-active");
   }
-  chip.textContent = text;
+  const value = document.createElement("span");
+  value.className = "topbar-summary-value";
+  value.textContent = text;
+  chip.append(value);
+
+  if (options.caption) {
+    const caption = document.createElement("span");
+    caption.className = "topbar-summary-caption";
+    caption.textContent = options.caption;
+    chip.append(caption);
+  }
+
   if (options.title) {
     chip.title = options.title;
   }
@@ -306,29 +329,40 @@ function renderTopbarSummary() {
   const turns = Math.max(1, Number.parseInt(elements.maxTurnsInput.value || "12", 10) || 12);
   const approvalLabel = elements.approveAllToggle.checked ? "Approve all" : "Manual approvals";
   const writesLabel = elements.previewWritesToggle.checked ? "Preview writes" : "Direct writes";
+  const historyLabel = elements.storeHistoryToggle.checked ? "History on" : "History off";
 
   elements.topbarSummary.textContent = "";
   elements.topbarSummary.append(
     createTopbarSummaryChip(workspace ? formatWorkspaceLabel(workspace) : "Choose workspace", {
       action: "workspace",
+      caption: "Directory",
       primary: true,
       title: workspace || "No workspace selected",
     }),
     createTopbarSummaryChip(model || "Choose model", {
       action: "model",
+      caption: "Model",
       active: state.topbarQuickEditor === "model",
     }),
     createTopbarSummaryChip(`${turns} turns`, {
       action: "turns",
+      caption: "Turns",
       active: state.topbarQuickEditor === "turns",
     }),
     createTopbarSummaryChip(approvalLabel, {
       action: "approveAll",
+      caption: "Approvals",
       active: elements.approveAllToggle.checked,
     }),
     createTopbarSummaryChip(writesLabel, {
       action: "previewWrites",
+      caption: "Writes",
       active: elements.previewWritesToggle.checked,
+    }),
+    createTopbarSummaryChip(historyLabel, {
+      action: "storeHistory",
+      caption: "History",
+      active: elements.storeHistoryToggle.checked,
     }),
   );
 
@@ -399,6 +433,12 @@ async function handleTopbarSummaryAction(action) {
   if (action === "previewWrites") {
     elements.previewWritesToggle.checked = !elements.previewWritesToggle.checked;
     syncTopbarState();
+    return;
+  }
+
+  if (action === "storeHistory") {
+    elements.storeHistoryToggle.checked = !elements.storeHistoryToggle.checked;
+    syncTopbarState();
   }
 }
 
@@ -435,11 +475,116 @@ function syncTopbarState() {
   renderTopbarQuickEditor();
 }
 
+function inspectorSplitBounds() {
+  const paneHeight = elements.inspectorPane?.getBoundingClientRect().height || 0;
+  const handleHeight = elements.inspectorResizeHandle?.getBoundingClientRect().height || 18;
+  const usableHeight = Math.max(0, paneHeight - handleHeight);
+
+  if (usableHeight <= 0) {
+    return {
+      min: 0.22,
+      max: 0.78,
+    };
+  }
+
+  const min = Math.min(0.45, INSPECTOR_MIN_PANEL_HEIGHT / usableHeight);
+  const max = 1 - min;
+
+  if (min >= max) {
+    return {
+      min: 0.5,
+      max: 0.5,
+    };
+  }
+
+  return { min, max };
+}
+
+function normalizeInspectorSplitRatio(ratio) {
+  const numeric = Number.parseFloat(String(ratio));
+  const fallback = Number.isFinite(numeric) ? numeric : DEFAULT_INSPECTOR_SPLIT;
+  const bounds = inspectorSplitBounds();
+
+  if (bounds.min === bounds.max) {
+    return bounds.min;
+  }
+
+  return Math.min(bounds.max, Math.max(bounds.min, fallback));
+}
+
+function applyInspectorSplit(ratio) {
+  const nextRatio = normalizeInspectorSplitRatio(ratio);
+  state.inspectorSplitRatio = nextRatio;
+  const bounds = inspectorSplitBounds();
+
+  const topPercent = (nextRatio * 100).toFixed(2);
+  const bottomPercent = ((1 - nextRatio) * 100).toFixed(2);
+  if (elements.inspectorPane) {
+    elements.inspectorPane.style.gridTemplateRows = `minmax(${INSPECTOR_MIN_PANEL_HEIGHT}px, ${topPercent}%) 18px minmax(${INSPECTOR_MIN_PANEL_HEIGHT}px, ${bottomPercent}%)`;
+  }
+
+  elements.inspectorResizeHandle?.setAttribute("aria-valuemin", String(Math.round(bounds.min * 100)));
+  elements.inspectorResizeHandle?.setAttribute("aria-valuemax", String(Math.round(bounds.max * 100)));
+  elements.inspectorResizeHandle?.setAttribute("aria-valuenow", String(Math.round(nextRatio * 100)));
+}
+
+function loadInspectorSplitPreference() {
+  const raw = window.localStorage.getItem(INSPECTOR_SPLIT_KEY);
+  applyInspectorSplit(raw ?? DEFAULT_INSPECTOR_SPLIT);
+}
+
+function saveInspectorSplitPreference() {
+  window.localStorage.setItem(INSPECTOR_SPLIT_KEY, String(state.inspectorSplitRatio));
+}
+
+function startInspectorResize(event) {
+  if (event.button !== 0 || !elements.inspectorPane || !elements.inspectorResizeHandle || state.inspectorCollapsed) {
+    return;
+  }
+
+  event.preventDefault();
+  const paneRect = elements.inspectorPane.getBoundingClientRect();
+  const handleHeight = elements.inspectorResizeHandle.getBoundingClientRect().height || 18;
+  const usableHeight = Math.max(1, paneRect.height - handleHeight);
+
+  const updateFromClientY = (clientY) => {
+    const offset = clientY - paneRect.top;
+    applyInspectorSplit(offset / usableHeight);
+  };
+
+  document.body.classList.add("inspector-resizing");
+  updateFromClientY(event.clientY);
+
+  const onMove = (moveEvent) => {
+    updateFromClientY(moveEvent.clientY);
+  };
+
+  const onUp = () => {
+    document.body.classList.remove("inspector-resizing");
+    saveInspectorSplitPreference();
+    window.removeEventListener("mousemove", onMove);
+    window.removeEventListener("mouseup", onUp);
+  };
+
+  window.addEventListener("mousemove", onMove);
+  window.addEventListener("mouseup", onUp);
+}
+
+function nudgeInspectorSplit(delta) {
+  applyInspectorSplit(state.inspectorSplitRatio + delta);
+  saveInspectorSplitPreference();
+}
+
 function applyInspectorCollapsed(collapsed) {
   state.inspectorCollapsed = Boolean(collapsed);
   document.body.classList.toggle("detail-pane-collapsed", state.inspectorCollapsed);
   elements.inspectorToggleButton.textContent = state.inspectorCollapsed ? "Show Inspector" : "Hide Inspector";
   elements.inspectorToggleButton.setAttribute("aria-expanded", String(!state.inspectorCollapsed));
+  if (!state.inspectorCollapsed) {
+    window.requestAnimationFrame(() => {
+      applyInspectorSplit(state.inspectorSplitRatio);
+    });
+  }
 }
 
 function loadInspectorPreference() {
@@ -2858,10 +3003,29 @@ function renderSessions() {
 
   for (const session of state.sessions) {
     const card = document.createElement("article");
-    card.className = `session-item ${state.currentSessionId === session.id ? "active" : ""}`;
+    const isActive = state.currentSessionId === session.id;
+    const isBranchSource = state.branchSessionId === session.id;
+    card.className = `session-item ${isActive ? "active" : ""} ${isBranchSource ? "branch-source" : ""}`;
 
     const header = document.createElement("div");
     header.className = "session-item-header";
+
+    const actions = document.createElement("div");
+    actions.className = "session-item-actions";
+
+    const branchButton = document.createElement("button");
+    branchButton.type = "button";
+    branchButton.className = `session-branch-button ${isBranchSource ? "is-active" : ""}`;
+    branchButton.textContent = isBranchSource ? "Branching" : "Branch";
+    branchButton.disabled = state.running;
+    branchButton.title = state.running
+      ? "Wait for the current run to finish before branching sessions."
+      : "Start the next run from this session but save it as a new branch.";
+    branchButton.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      await branchSessionFromUi(session);
+    });
 
     const deleteButton = document.createElement("button");
     deleteButton.type = "button";
@@ -2876,7 +3040,8 @@ function renderSessions() {
       await deleteSessionFromUi(session);
     });
 
-    header.append(deleteButton);
+    actions.append(branchButton, deleteButton);
+    header.append(actions);
 
     const openButton = document.createElement("button");
     openButton.type = "button";
@@ -2887,7 +3052,15 @@ function renderSessions() {
     model.textContent = session.model;
     const updated = document.createElement("span");
     updated.textContent = formatTime(session.updatedAt);
+    const branchStatus = document.createElement("span");
+    if (isBranchSource) {
+      branchStatus.className = "session-branch-badge";
+      branchStatus.textContent = "Branch source for the next run";
+    }
     openButton.append(title, model, updated);
+    if (isBranchSource) {
+      openButton.append(branchStatus);
+    }
     openButton.addEventListener("click", async () => {
       if (!desktopApi) {
         setStatus("Desktop IPC bridge is unavailable.");
@@ -2898,6 +3071,7 @@ function renderSessions() {
         return;
       }
       state.currentSessionId = loaded.id;
+      state.branchSessionId = null;
       renderSessions();
       renderSessionTranscript(loaded.events);
       resetProgress();
@@ -2939,12 +3113,86 @@ async function deleteSessionFromUi(session) {
 
   if (state.currentSessionId === session.id) {
     state.currentSessionId = null;
+    state.branchSessionId = null;
     resetTranscriptView();
     resetProgress();
   }
 
+  if (state.branchSessionId === session.id) {
+    state.branchSessionId = null;
+  }
+
   renderSessions();
   setStatus(`Deleted session: ${truncateText(title, 80)}`);
+}
+
+async function branchSessionFromUi(session) {
+  if (state.running) {
+    setStatus("Wait for the current run to finish before branching sessions.");
+    return;
+  }
+
+  if (!desktopApi) {
+    setStatus("Desktop IPC bridge is unavailable.");
+    return;
+  }
+
+  const loaded = await desktopApi.loadSession(state.cwd, session.id);
+  if (!loaded) {
+    setStatus("Could not load that session to branch.");
+    return;
+  }
+
+  state.currentSessionId = loaded.id;
+  state.branchSessionId = loaded.id;
+  renderSessions();
+  renderSessionTranscript(loaded.events);
+  resetProgress();
+  setStatus(`Branching from "${truncateText(session.lastUserPrompt || "Untitled session", 64)}". The next run will be saved as a new session.`);
+}
+
+async function openHistoryFolderFromUi() {
+  if (!desktopApi) {
+    setStatus("Desktop IPC bridge is unavailable.");
+    return;
+  }
+
+  const result = await desktopApi.openHistoryFolder(state.cwd);
+  if (!result?.ok) {
+    setStatus(result?.error || "Could not open the history folder.");
+    return;
+  }
+
+  setStatus(`Opened history folder for ${formatWorkspaceLabel(state.cwd)}.`);
+}
+
+async function clearWorkspaceHistoryFromUi() {
+  if (state.running) {
+    setStatus("Wait for the current run to finish before clearing workspace history.");
+    return;
+  }
+
+  if (!desktopApi) {
+    setStatus("Desktop IPC bridge is unavailable.");
+    return;
+  }
+
+  const confirmed = window.confirm(
+    `Clear saved history for this workspace?\n\nThis removes stored sessions, transcripts, and command logs under ${state.cwd}/.gradient-code, but keeps project notes.`,
+  );
+  if (!confirmed) {
+    return;
+  }
+
+  const payload = await desktopApi.clearWorkspaceHistory(state.cwd);
+  state.sessions = payload?.sessions || [];
+  state.currentSessionId = null;
+  state.branchSessionId = null;
+  resetTranscriptView();
+  ensureWorkspaceThread();
+  resetProgress();
+  renderSessions();
+  setStatus(payload?.cleared ? "Workspace history cleared." : "No workspace history was found to clear.");
 }
 
 function populateModelSelect(selectElement, options, selectedModel) {
@@ -2995,6 +3243,7 @@ function applyConfigToUi(cwd, config, sessions, modelOptions) {
   elements.maxTurnsInput.value = String(config.maxTurns || 12);
   elements.approveAllToggle.checked = Boolean(config.approveAll);
   elements.previewWritesToggle.checked = config.previewEdits !== false;
+  elements.storeHistoryToggle.checked = config.storeResponses !== false;
   populateModelOptions(state.modelOptions, config.model || state.model || "kimi-k2.5");
   setPreset(config.preset || state.preset || "default");
   syncTopbarState();
@@ -3310,6 +3559,8 @@ async function reloadWorkspaceState() {
     }
     const payload = await desktopApi.getBootstrap(cwd);
     applyConfigToUi(payload.cwd, payload.config, payload.sessions, payload.modelOptions);
+    state.currentSessionId = null;
+    state.branchSessionId = null;
     resetTranscriptView();
     ensureWorkspaceThread();
     await reloadWorkspaceBrowser();
@@ -3340,6 +3591,7 @@ async function saveConfig() {
     model: elements.modelInput.value,
     approveAll: elements.approveAllToggle.checked,
     previewEdits: elements.previewWritesToggle.checked,
+    storeResponses: elements.storeHistoryToggle.checked,
     maxTurns: Number.parseInt(elements.maxTurnsInput.value || "12", 10),
     preset: state.preset,
   };
@@ -3376,6 +3628,7 @@ async function startRun({ resumeLast = false } = {}) {
   const promptBackup = elements.promptInput.value;
   state.cwd = elements.workspaceInput.value.trim() || state.cwd;
   state.model = elements.modelInput.value || state.model || "kimi-k2.5";
+  const branchSessionId = resumeLast ? null : state.branchSessionId;
   appendDebug(`startRun:clicked cwd=${state.cwd} model=${state.model} resumeLast=${String(resumeLast)} prompt="${prompt}"`);
   state.cancelRequested = false;
 
@@ -3411,8 +3664,10 @@ async function startRun({ resumeLast = false } = {}) {
       preset: state.preset,
       approveAll: elements.approveAllToggle.checked,
       previewWrites: elements.previewWritesToggle.checked,
+      store: elements.storeHistoryToggle.checked,
       maxTurns: Number.parseInt(elements.maxTurnsInput.value || "12", 10),
       sessionId: resumeLast ? null : state.currentSessionId,
+      branchSessionId,
       resumeLast,
     });
     appendDebug("startRun:invoke resolved");
@@ -3577,6 +3832,7 @@ if (desktopApi) {
       setRunning(false);
       state.cancelRequested = false;
       state.currentSessionId = payload.sessionId;
+      state.branchSessionId = null;
       state.sessions = payload.sessions || state.sessions;
       renderSessions();
 
@@ -3699,6 +3955,42 @@ elements.inspectorToggleButton.addEventListener("click", () => {
   setInspectorCollapsed(!state.inspectorCollapsed);
 });
 
+elements.inspectorResizeHandle.addEventListener("mousedown", (event) => {
+  startInspectorResize(event);
+});
+
+elements.inspectorResizeHandle.addEventListener("dblclick", () => {
+  applyInspectorSplit(DEFAULT_INSPECTOR_SPLIT);
+  saveInspectorSplitPreference();
+});
+
+elements.inspectorResizeHandle.addEventListener("keydown", (event) => {
+  if (event.key === "ArrowUp") {
+    event.preventDefault();
+    nudgeInspectorSplit(-0.04);
+    return;
+  }
+
+  if (event.key === "ArrowDown") {
+    event.preventDefault();
+    nudgeInspectorSplit(0.04);
+    return;
+  }
+
+  if (event.key === "Home") {
+    event.preventDefault();
+    applyInspectorSplit(inspectorSplitBounds().min);
+    saveInspectorSplitPreference();
+    return;
+  }
+
+  if (event.key === "End") {
+    event.preventDefault();
+    applyInspectorSplit(inspectorSplitBounds().max);
+    saveInspectorSplitPreference();
+  }
+});
+
 elements.topbarCollapseButton.addEventListener("click", () => {
   setTopbarCollapsed(true);
 });
@@ -3715,6 +4007,14 @@ elements.topbarQuickCloseButton.addEventListener("click", () => {
 elements.refreshSessionsButton.addEventListener("click", async () => {
   await reloadWorkspaceState();
   setStatus("Workspace state refreshed.");
+});
+
+elements.openHistoryFolderButton.addEventListener("click", async () => {
+  await openHistoryFolderFromUi();
+});
+
+elements.clearHistoryButton.addEventListener("click", async () => {
+  await clearWorkspaceHistoryFromUi();
 });
 
 elements.reloadWorkspaceTreeButton.addEventListener("click", async () => {
@@ -3815,6 +4115,10 @@ elements.previewWritesToggle.addEventListener("change", () => {
   syncTopbarState();
 });
 
+elements.storeHistoryToggle.addEventListener("change", () => {
+  syncTopbarState();
+});
+
 elements.promptInput.addEventListener("keydown", async (event) => {
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     event.preventDefault();
@@ -3838,8 +4142,10 @@ syncTopbarState();
 loadRunDetailsPreference();
 loadTopbarPreference();
 loadInspectorPreference();
+loadInspectorSplitPreference();
 appendDebug(`desktopApi:${desktopApi ? "available" : "missing"}`);
 bootstrap();
 window.addEventListener("resize", () => {
   fitAllSessionCards();
+  applyInspectorSplit(state.inspectorSplitRatio);
 });
