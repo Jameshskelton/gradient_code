@@ -15,6 +15,7 @@ import type {
 } from "@gradient-code/shared";
 import {
   buildAgentSystemPrompt,
+  deleteSessionsForWorkspace,
   deleteSession,
   loadProjectNotes,
   resolveProjectNotesPath,
@@ -557,8 +558,10 @@ async function clearWorkspaceHistory(cwd: string): Promise<{ cleared: boolean; s
     await fs.rm(directory, { recursive: true, force: true });
   }
 
+  const deletedGlobalSessions = await deleteSessionsForWorkspace(resolvedCwd);
+
   return {
-    cleared,
+    cleared: cleared || deletedGlobalSessions > 0,
     sessions: await listSessions(resolvedCwd),
   };
 }

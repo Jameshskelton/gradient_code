@@ -1510,6 +1510,9 @@ function buildRequestBody(
   prepared: PreparedProviderRequest,
   stream: boolean,
 ): Record<string, unknown> {
+  const parallelToolCalls =
+    prepared.tools.length > 0 && prepared.profile.supportsParallelToolCalls === true ? true : undefined;
+
   if (endpoint === "responses") {
     return {
       model: prepared.model,
@@ -1517,7 +1520,7 @@ function buildRequestBody(
       input: buildResponsesInput(request.messages),
       tools: toResponsesTools(prepared.tools),
       tool_choice: prepared.tools.length > 0 ? "auto" : undefined,
-      parallel_tool_calls: prepared.tools.length > 0 ? prepared.profile.supportsParallelToolCalls : undefined,
+      parallel_tool_calls: parallelToolCalls,
       store: request.store ?? false,
       stream,
     };
@@ -1528,7 +1531,7 @@ function buildRequestBody(
     messages: toMessages(prepared.systemPrompt, request.messages),
     tools: prepared.tools.length > 0 ? toTools(prepared.tools) : undefined,
     tool_choice: prepared.tools.length > 0 ? "auto" : undefined,
-    parallel_tool_calls: prepared.tools.length > 0 ? prepared.profile.supportsParallelToolCalls : undefined,
+    parallel_tool_calls: parallelToolCalls,
     stream,
   };
 }

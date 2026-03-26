@@ -1,4 +1,5 @@
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 const PRESET_INSTRUCTIONS = {
     default: [
@@ -85,6 +86,15 @@ function timestamp() {
 }
 function gradientCodeDir(cwd) {
     return path.join(cwd, ".gradient-code");
+}
+function globalGradientCodeDir() {
+    return path.join(os.homedir(), ".gradient-code");
+}
+function globalSessionsDir() {
+    return path.join(globalGradientCodeDir(), "sessions");
+}
+function knownWorkspacesPath() {
+    return path.join(globalGradientCodeDir(), "workspaces.json");
 }
 export function resolveProjectNotesPath(cwd, customPath) {
     return customPath ? path.resolve(cwd, customPath) : path.join(gradientCodeDir(cwd), "project-notes.md");
@@ -174,6 +184,200 @@ function buildTurnSystemPrompt(basePrompt, options) {
 }
 function sessionsDir(cwd) {
     return path.join(gradientCodeDir(cwd), "sessions");
+}
+function normalizeWorkspacePath(cwd) {
+    return path.resolve(cwd);
+}
+function sameWorkspace(left, right) {
+    return normalizeWorkspacePath(left) === normalizeWorkspacePath(right);
+}
+function sessionFilePath(directory, sessionId) {
+    return path.join(directory, `${sessionId}.json`);
+}
+async function readSessionState(filePath) {
+    try {
+        const raw = await fs.readFile(filePath, "utf8");
+        return JSON.parse(raw);
+    }
+    catch {
+        return null;
+    }
+}
+async function writeSessionState(filePath, state) {
+    await fs.mkdir(path.dirname(filePath), { recursive: true });
+    await fs.writeFile(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+function summarizeSession(state) {
+    const lastUserEvent = [...state.events].reverse().find((event) => event.type === "user");
+    return {
+        id: state.id,
+        cwd: state.cwd,
+        model: state.model,
+        createdAt: state.createdAt,
+        updatedAt: state.updatedAt,
+        lastUserPrompt: lastUserEvent?.type === "user" ? lastUserEvent.text : "",
+    };
+}
+function compareIsoTimestampDescending(left, right) {
+    const leftTime = Date.parse(left);
+    const rightTime = Date.parse(right);
+    if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+        return rightTime - leftTime;
+    }
+    return right.localeCompare(left);
+}
+async function listSessionStatesInDirectory(directory) {
+    try {
+        const entries = (await fs.readdir(directory))
+            .filter((entry) => entry.endsWith(".json"))
+            .sort()
+            .reverse();
+        const states = await Promise.all(entries.map((entry) => readSessionState(path.join(directory, entry))));
+        return states.filter((state) => Boolean(state));
+    }
+    catch {
+        return [];
+    }
+}
+async function readKnownWorkspaceRegistry() {
+    try {
+        const raw = await fs.readFile(knownWorkspacesPath(), "utf8");
+        const parsed = JSON.parse(raw);
+        const workspaces = Array.isArray(parsed.workspaces)
+            ? parsed.workspaces
+                .map((workspace) => normalizeWorkspacePath(String(workspace)))
+                .filter(Boolean)
+            : [];
+        return {
+            workspaces: [...new Set(workspaces)].sort((left, right) => left.localeCompare(right)),
+            legacyDiscoveryCompleted: parsed.legacyDiscoveryCompleted === true,
+        };
+    }
+    catch {
+        return {
+            workspaces: [],
+            legacyDiscoveryCompleted: false,
+        };
+    }
+}
+async function writeKnownWorkspaceRegistry(registry) {
+    await fs.mkdir(globalGradientCodeDir(), { recursive: true });
+    await fs.writeFile(knownWorkspacesPath(), `${JSON.stringify({
+        workspaces: [...new Set(registry.workspaces.map((workspace) => normalizeWorkspacePath(workspace)))].sort((left, right) => left.localeCompare(right)),
+        legacyDiscoveryCompleted: registry.legacyDiscoveryCompleted === true,
+    }, null, 2)}\n`, "utf8");
+}
+async function directoryHasSessionFiles(directory) {
+    try {
+        const entries = await fs.readdir(directory);
+        return entries.some((entry) => entry.endsWith(".json"));
+    }
+    catch {
+        return false;
+    }
+}
+async function discoverLegacyWorkspaces(rootDir) {
+    const ignoredNames = new Set([
+        ".git",
+        ".gradient-code",
+        ".Trash",
+        "Applications",
+        "Library",
+        "Movies",
+        "Music",
+        "Pictures",
+        "Public",
+        "node_modules",
+    ]);
+    const maxDepth = 6;
+    const maxDirectories = 4000;
+    const results = new Set();
+    const queue = [{ directory: rootDir, depth: 0 }];
+    let visitedDirectories = 0;
+    while (queue.length > 0 && visitedDirectories < maxDirectories) {
+        const current = queue.pop();
+        if (!current) {
+            continue;
+        }
+        visitedDirectories += 1;
+        const entries = await fs.readdir(current.directory, { withFileTypes: true }).catch(() => []);
+        const hasLocalSessions = await directoryHasSessionFiles(path.join(current.directory, ".gradient-code", "sessions"));
+        if (hasLocalSessions) {
+            results.add(normalizeWorkspacePath(current.directory));
+            continue;
+        }
+        if (current.depth >= maxDepth) {
+            continue;
+        }
+        for (const entry of entries) {
+            if (!entry.isDirectory() || entry.isSymbolicLink()) {
+                continue;
+            }
+            if (ignoredNames.has(entry.name)) {
+                continue;
+            }
+            queue.push({
+                directory: path.join(current.directory, entry.name),
+                depth: current.depth + 1,
+            });
+        }
+    }
+    return [...results].sort((left, right) => left.localeCompare(right));
+}
+async function ensureKnownWorkspaceRegistry(cwd) {
+    const registry = await readKnownWorkspaceRegistry();
+    const workspaces = new Set(registry.workspaces.map((workspace) => normalizeWorkspacePath(workspace)));
+    if (cwd) {
+        workspaces.add(normalizeWorkspacePath(cwd));
+    }
+    let discoveredNow = false;
+    if (!registry.legacyDiscoveryCompleted) {
+        const discovered = await discoverLegacyWorkspaces(os.homedir());
+        for (const workspace of discovered) {
+            workspaces.add(workspace);
+        }
+        discoveredNow = true;
+    }
+    const nextRegistry = {
+        workspaces: [...workspaces].sort((left, right) => left.localeCompare(right)),
+        legacyDiscoveryCompleted: registry.legacyDiscoveryCompleted || discoveredNow,
+    };
+    if (nextRegistry.legacyDiscoveryCompleted !== registry.legacyDiscoveryCompleted ||
+        nextRegistry.workspaces.length !== registry.workspaces.length ||
+        nextRegistry.workspaces.some((workspace, index) => workspace !== registry.workspaces[index])) {
+        await writeKnownWorkspaceRegistry(nextRegistry);
+    }
+    return {
+        workspaces: nextRegistry.workspaces,
+        discoveredNow,
+    };
+}
+async function syncWorkspaceSessionsToGlobal(cwd) {
+    const resolvedCwd = normalizeWorkspacePath(cwd);
+    const states = await listSessionStatesInDirectory(sessionsDir(resolvedCwd));
+    if (states.length === 0) {
+        return;
+    }
+    await fs.mkdir(globalSessionsDir(), { recursive: true });
+    await Promise.all(states.map(async (state) => {
+        const normalizedState = {
+            ...state,
+            cwd: normalizeWorkspacePath(state.cwd || resolvedCwd),
+        };
+        await writeSessionState(sessionFilePath(globalSessionsDir(), normalizedState.id), normalizedState);
+    }));
+}
+async function ensureGlobalSessionStore(cwd) {
+    const registry = await ensureKnownWorkspaceRegistry(cwd);
+    if (cwd) {
+        await syncWorkspaceSessionsToGlobal(cwd);
+    }
+    if (registry.discoveredNow) {
+        const additionalWorkspaces = cwd
+            ? registry.workspaces.filter((workspace) => !sameWorkspace(workspace, cwd))
+            : registry.workspaces;
+        await Promise.all(additionalWorkspaces.map((workspace) => syncWorkspaceSessionsToGlobal(workspace)));
+    }
 }
 function configPath(cwd) {
     return path.join(cwd, "gradient-code.config.json");
@@ -350,73 +554,89 @@ export async function saveGradientCodeConfig(cwd, config) {
     return filePath;
 }
 export async function loadSession(cwd, sessionId) {
-    try {
-        const filePath = path.join(sessionsDir(cwd), `${sessionId}.json`);
-        const raw = await fs.readFile(filePath, "utf8");
-        return JSON.parse(raw);
+    const resolvedCwd = normalizeWorkspacePath(cwd);
+    const localState = await readSessionState(sessionFilePath(sessionsDir(resolvedCwd), sessionId));
+    if (localState) {
+        return {
+            ...localState,
+            cwd: normalizeWorkspacePath(localState.cwd || resolvedCwd),
+        };
     }
-    catch {
+    const globalState = await readSessionState(sessionFilePath(globalSessionsDir(), sessionId));
+    if (!globalState) {
         return null;
     }
+    return {
+        ...globalState,
+        cwd: normalizeWorkspacePath(globalState.cwd),
+    };
 }
 export async function deleteSession(cwd, sessionId) {
-    try {
-        const filePath = path.join(sessionsDir(cwd), `${sessionId}.json`);
-        await fs.unlink(filePath);
-        return true;
+    const resolvedCwd = normalizeWorkspacePath(cwd);
+    let deleted = false;
+    const localPath = sessionFilePath(sessionsDir(resolvedCwd), sessionId);
+    const globalPath = sessionFilePath(globalSessionsDir(), sessionId);
+    const globalState = await readSessionState(globalPath);
+    await Promise.all([
+        fs.unlink(localPath)
+            .then(() => {
+            deleted = true;
+        })
+            .catch(() => undefined),
+        fs.unlink(globalPath)
+            .then(() => {
+            deleted = true;
+        })
+            .catch(() => undefined),
+    ]);
+    if (globalState?.cwd && !sameWorkspace(globalState.cwd, resolvedCwd)) {
+        await fs.unlink(sessionFilePath(sessionsDir(globalState.cwd), sessionId))
+            .then(() => {
+            deleted = true;
+        })
+            .catch(() => undefined);
     }
-    catch {
-        return false;
-    }
+    return deleted;
 }
 export async function loadLatestSession(cwd) {
-    try {
-        const directory = sessionsDir(cwd);
-        const entries = await fs.readdir(directory);
-        const jsonFiles = entries.filter((entry) => entry.endsWith(".json")).sort();
-        if (jsonFiles.length === 0) {
-            return null;
-        }
-        const latest = jsonFiles[jsonFiles.length - 1];
-        const raw = await fs.readFile(path.join(directory, latest), "utf8");
-        return JSON.parse(raw);
-    }
-    catch {
+    const states = await listSessionStatesInDirectory(sessionsDir(normalizeWorkspacePath(cwd)));
+    const [latest] = states.sort((left, right) => compareIsoTimestampDescending(left.updatedAt, right.updatedAt));
+    if (!latest) {
         return null;
     }
+    return latest;
 }
 export async function listSessions(cwd) {
-    try {
-        const directory = sessionsDir(cwd);
-        const entries = (await fs.readdir(directory))
-            .filter((entry) => entry.endsWith(".json"))
-            .sort()
-            .reverse();
-        const sessions = await Promise.all(entries.map(async (entry) => {
-            const raw = await fs.readFile(path.join(directory, entry), "utf8");
-            const state = JSON.parse(raw);
-            const lastUserEvent = [...state.events].reverse().find((event) => event.type === "user");
-            return {
-                id: state.id,
-                cwd: state.cwd,
-                model: state.model,
-                createdAt: state.createdAt,
-                updatedAt: state.updatedAt,
-                lastUserPrompt: lastUserEvent?.type === "user" ? lastUserEvent.text : "",
-            };
-        }));
-        return sessions;
-    }
-    catch {
-        return [];
-    }
+    await ensureGlobalSessionStore(cwd);
+    const states = await listSessionStatesInDirectory(globalSessionsDir());
+    return states
+        .map((state) => summarizeSession({
+        ...state,
+        cwd: normalizeWorkspacePath(state.cwd),
+    }))
+        .sort((left, right) => compareIsoTimestampDescending(left.updatedAt, right.updatedAt));
 }
 export async function saveSession(state) {
-    const directory = sessionsDir(state.cwd);
-    await fs.mkdir(directory, { recursive: true });
-    const filePath = path.join(directory, `${state.id}.json`);
-    await fs.writeFile(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+    const normalizedState = {
+        ...state,
+        cwd: normalizeWorkspacePath(state.cwd),
+    };
+    const directory = sessionsDir(normalizedState.cwd);
+    const filePath = sessionFilePath(directory, normalizedState.id);
+    await ensureKnownWorkspaceRegistry(normalizedState.cwd);
+    await writeSessionState(filePath, normalizedState);
+    await writeSessionState(sessionFilePath(globalSessionsDir(), normalizedState.id), normalizedState);
     return filePath;
+}
+export async function deleteSessionsForWorkspace(cwd) {
+    const resolvedCwd = normalizeWorkspacePath(cwd);
+    const states = await listSessionStatesInDirectory(globalSessionsDir());
+    const matching = states.filter((state) => sameWorkspace(state.cwd, resolvedCwd));
+    if (matching.length === 0) {
+        return 0;
+    }
+    await Promise.all(matching.map((state) => fs.unlink(sessionFilePath(globalSessionsDir(), state.id)).catch(() => undefined)));
+    return matching.length;
 }
 export async function writeTranscript(cwd, events) {
     const logDir = gradientCodeDir(cwd);

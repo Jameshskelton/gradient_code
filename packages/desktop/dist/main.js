@@ -2,7 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promises as fs } from "node:fs";
 import { app, BrowserWindow, dialog, ipcMain, nativeImage, shell } from "electron";
-import { buildAgentSystemPrompt, deleteSession, loadProjectNotes, resolveProjectNotesPath, ToolRegistry, listSessions, loadGradientCodeConfig, loadLatestSession, loadSession, runAgent, saveGradientCodeConfig, saveSession, writeTranscript, } from "@gradient-code/core";
+import { buildAgentSystemPrompt, deleteSessionsForWorkspace, deleteSession, loadProjectNotes, resolveProjectNotesPath, ToolRegistry, listSessions, loadGradientCodeConfig, loadLatestSession, loadSession, runAgent, saveGradientCodeConfig, saveSession, writeTranscript, } from "@gradient-code/core";
 import { AVAILABLE_GRADIENT_MODELS, GradientResponsesClient, resolveModelCapabilityProfile, } from "@gradient-code/provider-gradient";
 import { getDefaultTools } from "@gradient-code/tools";
 const __filename = fileURLToPath(import.meta.url);
@@ -364,8 +364,9 @@ async function clearWorkspaceHistory(cwd) {
     if (remainingEntries.length === 0) {
         await fs.rm(directory, { recursive: true, force: true });
     }
+    const deletedGlobalSessions = await deleteSessionsForWorkspace(resolvedCwd);
     return {
-        cleared,
+        cleared: cleared || deletedGlobalSessions > 0,
         sessions: await listSessions(resolvedCwd),
     };
 }

@@ -1248,7 +1248,9 @@ body.command-palette-open {
 }
 
 .session-list {
+  flex: 1 1 auto;
   overflow: auto;
+  overflow-x: hidden;
   min-height: 0;
   padding-right: 6px;
 }
@@ -1272,28 +1274,29 @@ body.command-palette-open {
 
 .session-item {
   display: flex;
+  flex: 0 0 auto;
   flex-direction: column;
   align-items: flex-start;
   gap: 6px;
-  min-height: 112px;
-  padding: 16px 14px;
-  --session-title-size: 18px;
-  --session-meta-size: 13px;
+  min-height: 0;
+  padding: 10px;
+  --session-title-size: 13.5px;
+  --session-meta-size: 10.5px;
 }
 
 .session-item-header {
   display: flex;
   width: 100%;
-  justify-content: flex-end;
+  justify-content: stretch;
   align-items: center;
-  min-height: 24px;
+  min-height: 0;
 }
 
 .session-item-actions {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  gap: 8px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
+  gap: 5px;
 }
 
 .session-open-button {
@@ -1305,6 +1308,11 @@ body.command-palette-open {
   text-align: left;
   box-shadow: none;
   border-radius: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
 }
 
 .session-open-button:hover,
@@ -1313,29 +1321,37 @@ body.command-palette-open {
 }
 
 .session-delete-button {
-  flex: 0 0 auto;
-  padding: 6px 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 0;
   border-radius: 999px;
   border: 1px solid rgba(224, 78, 78, 0.18);
   background: rgba(255, 241, 241, 0.96);
   color: #ba3b3b;
-  font-size: 11px;
+  font-size: 8px;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
+  line-height: 1;
   box-shadow: none;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .session-branch-button {
-  flex: 0 0 auto;
-  padding: 6px 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 2px 0;
   border-radius: 999px;
   border: 1px solid rgba(0, 128, 255, 0.16);
   background: rgba(236, 245, 255, 0.96);
   color: var(--accent-strong);
-  font-size: 11px;
+  font-size: 8px;
   font-weight: 700;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.03em;
+  line-height: 1;
   box-shadow: none;
+  text-align: center;
+  white-space: nowrap;
 }
 
 .session-branch-button.is-active {
@@ -1381,10 +1397,14 @@ body.command-palette-open {
 .session-item strong {
   margin-bottom: 0;
   font-size: var(--session-title-size);
-  line-height: 1.18;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-  hyphens: auto;
+  line-height: 1.05;
+  display: block;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  overflow-wrap: normal;
+  word-break: normal;
+  hyphens: none;
 }
 
 .session-item span,
@@ -1401,9 +1421,20 @@ body.command-palette-open {
 
 .session-item span {
   font-size: var(--session-meta-size);
-  line-height: 1.3;
+  line-height: 1.08;
   overflow-wrap: anywhere;
   word-break: break-word;
+}
+
+.session-workspace-path {
+  color: var(--accent-strong);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-branch-badge {

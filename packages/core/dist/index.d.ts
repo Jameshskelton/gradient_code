@@ -57,6 +57,7 @@ export declare function deleteSession(cwd: string, sessionId: string): Promise<b
 export declare function loadLatestSession(cwd: string): Promise<AgentSessionState | null>;
 export declare function listSessions(cwd: string): Promise<SessionSummary[]>;
 export declare function saveSession(state: AgentSessionState): Promise<string>;
+export declare function deleteSessionsForWorkspace(cwd: string): Promise<number>;
 export declare function writeTranscript(cwd: string, events: SessionEvent[]): Promise<string>;
 export declare function runAgent(options: AgentRunOptions, dependencies: RunAgentDependencies): Promise<AgentRunResult>;
 export {};

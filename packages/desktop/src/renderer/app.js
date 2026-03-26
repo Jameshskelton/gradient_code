@@ -264,6 +264,7 @@ const elements = {
   commandPaletteResults: document.getElementById("commandPaletteResults"),
   composerForm: document.getElementById("composerForm"),
   promptInput: document.getElementById("promptInput"),
+  newSessionButton: document.getElementById("newSessionButton"),
   sendButton: document.getElementById("sendButton"),
   resumeButton: document.getElementById("resumeButton"),
   cancelButton: document.getElementById("cancelButton"),
@@ -682,6 +683,7 @@ function toErrorMessage(error) {
 function setRunning(running) {
   state.running = running;
   elements.sendButton.disabled = running;
+  elements.newSessionButton.disabled = running;
   elements.resumeButton.disabled = running;
   elements.cancelButton.disabled = !running;
   for (const button of presetButtons) {
@@ -795,16 +797,38 @@ function focusTimelineEntryFromPalette(threadId, entryId) {
   highlightCommandPaletteTarget(record.element);
 }
 
+function sameWorkspacePath(left, right) {
+  const normalize = (value) => String(value || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  return normalize(left) === normalize(right);
+}
+
 async function openSessionFromUi(session, options = {}) {
   if (!desktopApi) {
     setStatus("Desktop IPC bridge is unavailable.");
     return null;
   }
 
-  const loaded = await desktopApi.loadSession(state.cwd, session.id);
+  const loaded = await desktopApi.loadSession(session.cwd || state.cwd, session.id);
   if (!loaded) {
     setStatus("Could not load that session.");
     return null;
+  }
+
+  let workspaceStatusMessage = "";
+  if (loaded.cwd && !sameWorkspacePath(loaded.cwd, state.cwd)) {
+    try {
+      const payload = await desktopApi.getBootstrap(loaded.cwd);
+      applyConfigToUi(payload.cwd, payload.config, payload.sessions, payload.modelOptions, payload.projectNotes);
+      if (state.workspaceThreadId) {
+        updateThreadContext(state.workspaceThreadId, {
+          subtitle: formatWorkspaceLabel(payload.cwd),
+        });
+      }
+      await reloadWorkspaceBrowser();
+      workspaceStatusMessage = ` Switched to ${formatWorkspaceLabel(payload.cwd)}.`;
+    } catch (error) {
+      workspaceStatusMessage = ` Loaded the session, but could not switch to ${formatWorkspaceLabel(loaded.cwd)}: ${toErrorMessage(error)}`;
+    }
   }
 
   state.currentSessionId = loaded.id;
@@ -816,7 +840,7 @@ async function openSessionFromUi(session, options = {}) {
   if (options.statusText) {
     setStatus(options.statusText);
   } else if (!options.suppressStatus) {
-    setStatus("Conversation restored.");
+    setStatus(`Conversation restored.${workspaceStatusMessage}`.trim());
   }
 
   return loaded;
@@ -882,13 +906,14 @@ function buildApprovalCommands() {
 function buildSessionCommands() {
   return state.sessions.flatMap((session, index) => {
     const title = session.lastUserPrompt || "Untitled session";
-    const baseKeywords = `${title} ${session.model} session restore branch ${session.updatedAt}`;
+    const workspaceLabel = formatWorkspaceLabel(session.cwd);
+    const baseKeywords = `${title} ${session.model} ${workspaceLabel} ${session.cwd} session restore branch ${session.updatedAt}`;
     return [
       {
         id: `session:open:${session.id}`,
         group: "Session",
         title,
-        subtitle: `Open session · ${session.model} · ${formatTime(session.updatedAt)}`,
+        subtitle: `Open session · ${workspaceLabel} · ${session.model} · ${formatTime(session.updatedAt)}`,
         keywords: `${baseKeywords} open`,
         priority: state.currentSessionId === session.id ? 18 + index : 58 + index,
         badge: state.currentSessionId === session.id ? "Current" : "Session",
@@ -1018,6 +1043,19 @@ function buildFileCommands(query) {
 
 function buildActionCommands() {
   return [
+    {
+      id: "action:new-session",
+      group: "Action",
+      title: "Start New Session",
+      subtitle: "Clear the active conversation and begin fresh in this workspace.",
+      keywords: "new session fresh reset conversation clear current chat",
+      priority: -4,
+      badge: "Session",
+      disabled: state.running,
+      execute: () => {
+        startNewSessionFromUi();
+      },
+    },
     {
       id: "action:toggle-inspector",
       group: "Action",
@@ -2737,28 +2775,28 @@ function fitSessionCardText(card) {
     return;
   }
 
-  const maxTitleSize = 18;
-  const minTitleSize = 12;
-  const maxMetaSize = 13;
-  const minMetaSize = 10;
+  const maxTitleSize = 13.5;
+  const minTitleSize = 8.5;
+  const maxMetaSize = 10.5;
+  const minMetaSize = 8;
   let titleSize = maxTitleSize;
   let metaSize = maxMetaSize;
 
   card.style.setProperty("--session-title-size", `${titleSize}px`);
   card.style.setProperty("--session-meta-size", `${metaSize}px`);
 
-  for (let index = 0; index < 12; index += 1) {
+  for (let index = 0; index < 18; index += 1) {
     const titleLines = lineCountForElement(title);
-    const metaTooTall = meta.some((item) => lineCountForElement(item) > 2);
-    const titleTooTall = titleLines > 5;
-    const contentTooTall = card.getBoundingClientRect().height > 190;
+    const metaTooTall = meta.some((item) => lineCountForElement(item) > 1);
+    const titleTooTall = titleLines > 1;
+    const contentTooTall = card.getBoundingClientRect().height > 172;
 
     if (!titleTooTall && !metaTooTall && !contentTooTall) {
       break;
     }
 
     if (titleTooTall || contentTooTall) {
-      titleSize = Math.max(minTitleSize, titleSize - 1);
+      titleSize = Math.max(minTitleSize, titleSize - 0.5);
     }
 
     if (metaTooTall || contentTooTall) {
@@ -4654,7 +4692,14 @@ function renderSessions() {
     openButton.type = "button";
     openButton.className = "session-open-button";
     const title = document.createElement("strong");
-    title.textContent = session.lastUserPrompt || "Untitled session";
+    const sessionTitle = session.lastUserPrompt || "Untitled session";
+    title.textContent = sessionTitle;
+    title.title = sessionTitle;
+    openButton.title = `${sessionTitle}\n${session.cwd}`;
+    const workspace = document.createElement("span");
+    workspace.className = "session-workspace-path";
+    workspace.textContent = formatWorkspaceLabel(session.cwd);
+    workspace.title = session.cwd;
     const model = document.createElement("span");
     model.textContent = session.model;
     const updated = document.createElement("span");
@@ -4664,7 +4709,7 @@ function renderSessions() {
       branchStatus.className = "session-branch-badge";
       branchStatus.textContent = "Branch source for the next run";
     }
-    openButton.append(title, model, updated);
+    openButton.append(title, workspace, model, updated);
     if (isBranchSource) {
       openButton.append(branchStatus);
     }
@@ -4696,7 +4741,7 @@ async function deleteSessionFromUi(session) {
     return;
   }
 
-  const payload = await desktopApi.deleteSession(state.cwd, session.id);
+  const payload = await desktopApi.deleteSession(session.cwd || state.cwd, session.id);
   state.sessions = payload?.sessions || [];
 
   if (!payload?.deleted) {
@@ -4780,6 +4825,23 @@ async function clearWorkspaceHistoryFromUi() {
   resetProgress();
   renderSessions();
   setStatus(payload?.cleared ? "Workspace history cleared." : "No workspace history was found to clear.");
+}
+
+function startNewSessionFromUi() {
+  if (state.running) {
+    setStatus("Wait for the current run to finish before starting a new session.");
+    return;
+  }
+
+  state.currentSessionId = null;
+  state.branchSessionId = null;
+  state.approvals = [];
+  resetTranscriptView();
+  ensureWorkspaceThread();
+  resetProgress();
+  renderSessions();
+  setStatus(`New session ready in ${formatWorkspaceLabel(state.cwd)}. Your next message will start fresh.`);
+  elements.promptInput.focus();
 }
 
 function populateModelSelect(selectElement, options, selectedModel) {
@@ -5546,6 +5608,10 @@ if (desktopApi) {
 
 elements.sendButton.addEventListener("click", async () => {
   await startRun();
+});
+
+elements.newSessionButton.addEventListener("click", () => {
+  startNewSessionFromUi();
 });
 
 elements.resumeButton.addEventListener("click", async () => {
